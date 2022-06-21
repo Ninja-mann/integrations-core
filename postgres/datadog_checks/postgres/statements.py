@@ -163,26 +163,6 @@ class PostgresStatementMetrics(DBMAsyncJob):
         col_names = [desc[0] for desc in cursor.description] if cursor.description else []
         self._stat_column_cache = col_names
         return col_names
-    
-    def _track_io_timing_enabled(self):
-        """
-        Determine if the `track_io_timing` option is enabled.  This is a prerequisite for recording timing data.
-        """
-        if self._track_io_timing_cache is not None:
-            return self._track_io_timing_cache
-        
-        query = "SELECT setting FROM pg_settings WHERE name = 'track_io_timing'"
-        cursor = self._check._get_db(self._config.dbname).cursor()
-        res = self._execute_query(cursor, query, params=(self._config.dbname,))
-
-        # If the track_io_timing field does not exist, do not track timing data
-        if not res:
-            timing_enabled = False
-        else:
-            timing_enabled = res[0][0] == "on"
-
-        self._track_io_timing_cache = timing_enabled
-        return timing_enabled
 
     def run_job(self):
         self._tags_no_db = [t for t in self._tags if not t.startswith('db:')]
@@ -248,7 +228,7 @@ class PostgresStatementMetrics(DBMAsyncJob):
                 )
                 return []
 
-            if not self._track_io_timing_enabled():
+            if self._check.pg_settings.get("track_io_timing") != "on":
                 missing_columns -= PG_STAT_STATEMENTS_TIMING_COLUMNS
 
             query_columns = sorted(list(available_columns & PG_STAT_ALL_DESIRED_COLUMNS))
