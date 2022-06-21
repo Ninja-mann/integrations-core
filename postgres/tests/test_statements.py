@@ -19,7 +19,7 @@ from datadog_checks.base.utils.db.sql import compute_sql_signature
 from datadog_checks.base.utils.db.utils import DBMAsyncJob
 from datadog_checks.base.utils.serialization import json
 from datadog_checks.postgres.statement_samples import DBExplainError, StatementTruncationState
-from datadog_checks.postgres.statements import PG_STAT_STATEMENTS_METRICS_COLUMNS
+from datadog_checks.postgres.statements import PG_STAT_STATEMENTS_METRICS_COLUMNS, PG_STAT_STATEMENTS_TIMING_COLUMNS
 
 from .common import DB_NAME, HOST, PORT, POSTGRES_VERSION
 
@@ -103,8 +103,15 @@ def test_statement_metrics_version(integration_check, dbm_instance, version, exp
 
 @pytest.mark.parametrize("dbstrict", [True, False])
 @pytest.mark.parametrize("pg_stat_statements_view", ["pg_stat_statements", "datadog.pg_stat_statements()"])
+@pytest.mark.parametrize("track_io_timing_enabled", [True, False])
 def test_statement_metrics(
-    aggregator, integration_check, dbm_instance, dbstrict, pg_stat_statements_view, datadog_agent
+    aggregator,
+    integration_check,
+    dbm_instance,
+    dbstrict,
+    pg_stat_statements_view,
+    datadog_agent,
+    track_io_timing_enabled,
 ):
     dbm_instance['dbstrict'] = dbstrict
     dbm_instance['pg_stat_statements_view'] = pg_stat_statements_view
@@ -113,6 +120,21 @@ def test_statement_metrics(
     # very low collection interval for test purposes
     dbm_instance['query_metrics'] = {'enabled': True, 'run_sync': True, 'collection_interval': 0.1}
     connections = {}
+
+    def _set_track_io_timing():
+        # Set track_io_timing on all databases
+        for _user, _password, dbname, _query, _arg in SAMPLE_QUERIES:
+            if dbname not in connections:
+                connections[dbname] = psycopg2.connect(host=HOST, dbname=dbname, user="dd_admin", password="dd_admin")
+                connections[dbname].cursor().execute(
+                    "SET track_io_timing TO %s", ("on" if track_io_timing_enabled else "off",)
+                )
+
+        # Reset connections (we don't always want to connect as admin for queries)
+        for conn in connections.values():
+            conn.close()
+
+        connections.clear()
 
     def _run_queries():
         for user, password, dbname, query, arg in SAMPLE_QUERIES:
@@ -123,6 +145,8 @@ def test_statement_metrics(
     check = integration_check(dbm_instance)
     check._connect()
 
+    _set_track_io_timing()
+    check.check(dbm_instance)
     _run_queries()
     check.check(dbm_instance)
     _run_queries()
@@ -175,6 +199,10 @@ def test_statement_metrics(
         assert row['query'] == expected_query[0:200], "query should be truncated when sending to metrics"
         available_columns = set(row.keys())
         metric_columns = available_columns & PG_STAT_STATEMENTS_METRICS_COLUMNS
+        if track_io_timing_enabled:
+            metric_columns |= PG_STAT_STATEMENTS_TIMING_COLUMNS
+        else:
+            assert (available_columns & PG_STAT_STATEMENTS_TIMING_COLUMNS) == set()
         for col in metric_columns:
             assert type(row[col]) in (float, int)
 
