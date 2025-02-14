@@ -4,12 +4,11 @@
 import os
 
 from datadog_checks.dev import get_here
-from datadog_checks.dev.utils import get_tox_env
 
 dirname = os.path.dirname(__file__)
 HERE = get_here()
 
-TOX_ENV = get_tox_env()
+PROTOCOL = os.environ.get("PROTOCOL")
 
 CLUSTER_FILE = os.path.join(dirname, 'fdb.cluster')
 TLS_CLUSTER_FILE = os.path.join(dirname, 'fdb-tls.cluster')

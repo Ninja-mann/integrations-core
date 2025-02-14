@@ -2,11 +2,13 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import copy
+import logging
 import os
 
 import mock
 import pytest
 
+from datadog_checks.base import ensure_bytes
 from datadog_checks.snowflake import SnowflakeCheck, queries
 
 from .common import CHECK_NAME, EXPECTED_TAGS
@@ -65,7 +67,9 @@ def test_read_token(oauth_instance):
     oauth_token_path_inst['token'] = None
     oauth_token_path_inst['token_path'] = os.path.join(os.path.dirname(__file__), 'keys', 'token')
     check = SnowflakeCheck(CHECK_NAME, {}, [oauth_token_path_inst])
-    check.read_token()
+    token = check.read_token()
+    assert token == 'testtoken'
+    check.check(oauth_instance)
 
 
 def test_default_auth(instance):
@@ -90,7 +94,8 @@ def test_default_auth(instance):
             ocsp_response_cache_filename=None,
             authenticator='snowflake',
             token=None,
-            private_key=None,
+            private_key_file=None,
+            private_key_file_pwd=None,
             client_session_keep_alive=False,
             proxy_host=None,
             proxy_port=None,
@@ -123,7 +128,8 @@ def test_oauth_auth(oauth_instance):
             ocsp_response_cache_filename=None,
             authenticator='oauth',
             token='testtoken',
-            private_key=None,
+            private_key_file=None,
+            private_key_file_pwd=None,
             client_session_keep_alive=False,
             proxy_host=None,
             proxy_port=None,
@@ -132,15 +138,18 @@ def test_oauth_auth(oauth_instance):
         )
 
 
-def test_key_auth(dd_run_check, instance):
+@pytest.mark.parametrize(
+    'key_file, password',
+    [
+        pytest.param('rsa_key_example.p8', None, id='no password'),
+        pytest.param('rsa_key_pass_example.p8', 'keypass', id='with password'),
+    ],
+)
+def test_key_auth(dd_run_check, instance, key_file, password):
     # Key auth
     inst = copy.deepcopy(instance)
-    inst['private_key_path'] = os.path.join(os.path.dirname(__file__), 'keys', 'rsa_key_example.p8')
-
-    check = SnowflakeCheck(CHECK_NAME, {}, [inst])
-    # Checking size instead of the read key
-    read_key = check.read_key()
-    assert len(read_key) == 1216
+    inst['private_key_path'] = os.path.join(os.path.dirname(__file__), 'keys', key_file)
+    inst['private_key_password'] = password
 
     with mock.patch('datadog_checks.snowflake.check.sf') as sf:
         check = SnowflakeCheck(CHECK_NAME, {}, [inst])
@@ -160,24 +169,14 @@ def test_key_auth(dd_run_check, instance):
             ocsp_response_cache_filename=None,
             authenticator='snowflake',
             token=None,
-            private_key=read_key,
+            private_key_file=inst['private_key_path'],
+            private_key_file_pwd=ensure_bytes(inst['private_key_password']),
             client_session_keep_alive=False,
             proxy_host=None,
             proxy_port=None,
             proxy_user=None,
             proxy_password=None,
         )
-
-    inst['private_key_path'] = os.path.join(os.path.dirname(__file__), 'keys', 'wrong_key.p8')
-    check = SnowflakeCheck(CHECK_NAME, {}, [inst])
-    with pytest.raises(FileNotFoundError):
-        check.read_key()
-
-    # Read key protected by a passphrase
-    inst['private_key_path'] = os.path.join(os.path.dirname(__file__), 'keys', 'rsa_key_pass_example.p8')
-    inst['private_key_password'] = 'keypass'
-    check = SnowflakeCheck(CHECK_NAME, {}, [inst])
-    assert len(check.read_key()) == 1218
 
 
 def test_proxy_settings(instance):
@@ -208,7 +207,8 @@ def test_proxy_settings(instance):
             ocsp_response_cache_filename=None,
             authenticator='snowflake',
             token=None,
-            private_key=None,
+            private_key_file=None,
+            private_key_file_pwd=None,
             client_session_keep_alive=False,
             proxy_host='testhost',
             proxy_port=8000,
@@ -255,21 +255,166 @@ def test_additional_metric_groups(instance):
     ]
 
 
-def test_metric_group_exceptions(instance):
+def test_wrong_account_metric_groups(instance):
+    instance = copy.deepcopy(instance)
+    instance['metric_groups'] = [
+        'snowflake.organization.warehouse',
+        'snowflake.organization.currency',
+        'snowflake.organization.storage',
+    ]
+    with pytest.raises(
+        Exception,
+        match='No valid metric_groups for `ACCOUNT_USAGE` or custom query configured, please list at least one.',
+    ):
+        SnowflakeCheck(CHECK_NAME, {}, [instance])
+
+
+def test_wrong_org_metric_groups(instance):
+    instance = copy.deepcopy(instance)
+    instance['schema'] = 'ORGANIZATION_USAGE'
+    instance['metric_groups'] = [
+        'snowflake.logins',
+    ]
+    with pytest.raises(
+        Exception,
+        match='No valid metric_groups for `ORGANIZATION_USAGE` or custom query configured, please list at least one.',
+    ):
+        SnowflakeCheck(CHECK_NAME, {}, [instance])
+
+
+def test_account_org_metric_groups(instance):
+    instance = copy.deepcopy(instance)
+    instance['metric_groups'] = [
+        'snowflake.organization.warehouse',
+        'snowflake.organization.currency',
+        'snowflake.organization.storage',
+        'snowflake.data_transfer',
+    ]
+    check = SnowflakeCheck(CHECK_NAME, {}, [instance])
+    assert check._config.metric_groups == [
+        'snowflake.organization.warehouse',
+        'snowflake.organization.currency',
+        'snowflake.organization.storage',
+        'snowflake.data_transfer',
+    ]
+
+    assert check.metric_queries == [
+        queries.DataTransferHistory,
+    ]
+
+
+def test_default_org_metric_groups(instance):
+    instance = copy.deepcopy(instance)
+    instance['schema'] = 'ORGANIZATION_USAGE'
+    check = SnowflakeCheck(CHECK_NAME, {}, [instance])
+    assert check._config.metric_groups == [
+        'snowflake.organization.warehouse',
+        'snowflake.organization.currency',
+        'snowflake.organization.storage',
+    ]
+
+    assert check.metric_queries == [
+        queries.OrgWarehouseCreditUsage,
+        queries.OrgCurrencyUsage,
+        queries.OrgStorageDaily,
+    ]
+
+
+def test_org_metric_groups(instance):
+    instance = copy.deepcopy(instance)
+    instance['schema'] = 'ORGANIZATION_USAGE'
+    instance['metric_groups'] = ['snowflake.organization.currency', 'snowflake.organization.contracts']
+    check = SnowflakeCheck(CHECK_NAME, {}, [instance])
+    assert check._config.metric_groups == ['snowflake.organization.currency', 'snowflake.organization.contracts']
+
+    assert check.metric_queries == [
+        queries.OrgCurrencyUsage,
+        queries.OrgContractItems,
+    ]
+
+
+def test_all_org_metric_groups(instance):
+    instance = copy.deepcopy(instance)
+    instance['schema'] = 'ORGANIZATION_USAGE'
+    instance['metric_groups'] = [
+        'snowflake.organization.contracts',
+        'snowflake.organization.credit',
+        'snowflake.organization.currency',
+        'snowflake.organization.warehouse',
+        'snowflake.organization.storage',
+        'snowflake.organization.balance',
+        'snowflake.organization.rate',
+        'snowflake.organization.data_transfer',
+    ]
+    check = SnowflakeCheck(CHECK_NAME, {}, [instance])
+    assert check._config.metric_groups == [
+        'snowflake.organization.contracts',
+        'snowflake.organization.credit',
+        'snowflake.organization.currency',
+        'snowflake.organization.warehouse',
+        'snowflake.organization.storage',
+        'snowflake.organization.balance',
+        'snowflake.organization.rate',
+        'snowflake.organization.data_transfer',
+    ]
+
+    assert check.metric_queries == [
+        queries.OrgContractItems,
+        queries.OrgCreditUsage,
+        queries.OrgCurrencyUsage,
+        queries.OrgWarehouseCreditUsage,
+        queries.OrgStorageDaily,
+        queries.OrgBalance,
+        queries.OrgRateSheet,
+        queries.OrgDataTransfer,
+    ]
+
+
+@pytest.mark.parametrize(
+    'schema',
+    [
+        pytest.param('ACCOUNT_USAGE'),
+        pytest.param('ORGANIZATION_USAGE'),
+    ],
+)
+def test_no_valid_metric_groups(instance, schema):
     instance = copy.deepcopy(instance)
     instance['metric_groups'] = ['fake.metric.group']
-    with pytest.raises(Exception, match='No valid metric_groups or custom query configured, please list at least one.'):
+    instance['schema'] = schema
+    with pytest.raises(
+        Exception,
+        match='No valid metric_groups for `{}` or custom query configured, please list at least one.'.format(schema),
+    ):
         check = SnowflakeCheck(CHECK_NAME, {}, [instance])
         check.log = mock.MagicMock()
-        check.log.warning.assert_called_once_with(
-            "Invalid metric_groups found in snowflake conf.yaml: fake.metric.group"
-        )
+
+
+@pytest.mark.parametrize(
+    'schema',
+    [
+        pytest.param('ACCOUNT_USAGE'),
+        pytest.param('ORGANIZATION_USAGE'),
+    ],
+)
+def test_metric_group_exceptions(instance, schema, caplog):
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    instance = copy.deepcopy(instance)
+    instance['metric_groups'] = ['fake.metric.group', 'snowflake.organization.warehouse', 'snowflake.logins']
+    instance['schema'] = schema
+    SnowflakeCheck(CHECK_NAME, {}, [instance])
+    assert (
+        "Invalid metric_groups for `{}` found in snowflake conf.yaml: fake.metric.group".format(schema) in caplog.text
+    )
 
 
 def test_no_metric_group(instance):
     inst = copy.deepcopy(instance)
     inst['metric_groups'] = []
-    with pytest.raises(Exception, match='No valid metric_groups or custom query configured, please list at least one.'):
+    with pytest.raises(
+        Exception,
+        match='No valid metric_groups for `ACCOUNT_USAGE` or custom query configured, please list at least one.',
+    ):
         SnowflakeCheck(CHECK_NAME, {}, [inst])
 
     inst['custom_queries'] = [
@@ -333,3 +478,34 @@ def test_aggregate_last_24_hours_queries(aggregate_last_24_hours, expected_query
 
     # Only one query configured
     assert check.metric_queries[0]['query'] == expected_query
+
+
+def test_aggregate_last_24_hours_queries_multiple_instances():
+    # This test checks that the `aggregate_last_24_hours` setting doesn't leak into other instances.
+    inst_default = {
+        'metric_groups': ['snowflake.replication'],
+        'username': 'user',
+        'password': 'password',
+        'account': 'account',
+        'role': 'role',
+    }
+
+    inst_last_24_hours = dict(inst_default)
+
+    inst_default['aggregate_last_24_hours'] = False
+    inst_last_24_hours['aggregate_last_24_hours'] = True
+
+    check_default = SnowflakeCheck(CHECK_NAME, {}, [inst_default])
+    check_last_24_hours = SnowflakeCheck(CHECK_NAME, {}, [inst_last_24_hours])
+
+    assert check_default.metric_queries[0]['query'] == (
+        'select database_name, avg(credits_used), sum(credits_used), '
+        'avg(bytes_transferred), sum(bytes_transferred) from replication_usage_history '
+        'where start_time >= date_trunc(day, current_date) group by 1;'
+    )
+
+    assert check_last_24_hours.metric_queries[0]['query'] == (
+        'select database_name, avg(credits_used), sum(credits_used), '
+        'avg(bytes_transferred), sum(bytes_transferred) from replication_usage_history '
+        'where start_time >= DATEADD(hour, -24, current_timestamp()) group by 1;'
+    )

@@ -2,10 +2,11 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import os
+import re
 from contextlib import suppress
 
 import click
-from semver import finalize_version, parse_version_info
+from semver import VersionInfo, finalize_version
 
 from ...constants import BETA_PACKAGES, NOT_CHECKS, VERSION_BUMP, get_agent_release_requirements
 from ...git import get_current_branch, git_commit
@@ -16,9 +17,19 @@ from . import changelog
 from .show import changes
 
 
+def validate_version(ctx, param, value):
+    if value is not None:
+        if re.match("^\\d+\\.\\d+\\.\\d+(-(rc|pre|alpha|beta)\\.\\d+)?$", value):
+            return value
+
+        raise click.BadParameter('must match `^\\d+\\.\\d+\\.\\d+(-(rc|pre|alpha|beta)\\.\\d+)?$`')
+
+    return None
+
+
 @click.command(context_settings=CONTEXT_SETTINGS, short_help='Release one or more checks')
 @click.argument('checks', shell_complete=complete_valid_checks, nargs=-1, required=True)
-@click.option('--version')
+@click.option('--version', callback=validate_version)
 @click.option('--end')
 @click.option('--new', 'initial_release', is_flag=True, help='Ensure versions are at 1.0.0')
 @click.option('--skip-sign', is_flag=True, help='Skip the signing of release metadata')
@@ -76,7 +87,7 @@ def make(ctx, checks, version, end, initial_release, skip_sign, sign_only, exclu
         abort('Please create a release branch, you do not want to commit to master directly.')
 
     # Signing is done by a pipeline in a separate commit
-    if not core_workflow and not sign_only:
+    if (not core_workflow and not sign_only) or checks == ["ddev"]:
         skip_sign = True
 
     # Keep track of the list of checks that have been updated.
@@ -110,15 +121,22 @@ def make(ctx, checks, version, end, initial_release, skip_sign, sign_only, exclu
                         version = VERSION_BUMP[method](prev_version)
                         prev_version = version
 
-            p_version = parse_version_info(version)
-            p_current = parse_version_info(cur_version)
+            p_version = VersionInfo.parse(version)
+            p_current = VersionInfo.parse(cur_version)
             if p_version <= p_current:
                 if initial_release:
                     continue
                 else:
                     abort(f'Current version is {cur_version}, cannot bump to {version}')
         else:
-            cur_version, changelog_types = ctx.invoke(changes, check=check, end=end, dry_run=True)
+            if check == 'ddev':
+                cur_version = get_version_string(check)
+                _, changelog_types = ctx.invoke(
+                    changes, check=check, tag_pattern='ddev-v.+', tag_prefix='ddev-v', dry_run=True
+                )
+            else:
+                cur_version, changelog_types = ctx.invoke(changes, check=check, dry_run=True)
+
             echo_debug(f'Current version: {cur_version}. Changes: {changelog_types}')
             if not changelog_types:
                 echo_warning(f'No changes for {check}, skipping...')
@@ -129,26 +147,26 @@ def make(ctx, checks, version, end, initial_release, skip_sign, sign_only, exclu
         if initial_release:
             echo_success(f'Check `{check}`')
 
-        # update the version number
-        echo_info(f'Current version of check {check}: {cur_version}')
-        echo_waiting(f'Bumping to {version}... ', nl=False)
-        update_version_module(check, cur_version, version)
-        echo_success('success!')
-
         # update the CHANGELOG
         echo_waiting('Updating the changelog... ', nl=False)
-        # TODO: Avoid double GitHub API calls when bumping all checks at once
         ctx.invoke(
             changelog,
             check=check,
             version=version,
-            old_version=cur_version,
-            end=end,
-            initial=initial_release,
+            old_version=None if check == 'ddev' else cur_version,
             quiet=True,
             dry_run=False,
+            tag_pattern='ddev-v.+' if check == 'ddev' else None,
+            tag_prefix='ddev-v' if check == 'ddev' else 'v',
         )
         echo_success('success!')
+
+        # update the version number
+        if check != 'ddev':
+            echo_info(f'Current version of check {check}: {cur_version}')
+            echo_waiting(f'Bumping to {version}... ', nl=False)
+            update_version_module(check, cur_version, version)
+            echo_success('success!')
 
         commit_targets = [check]
         updated_checks.append(check)

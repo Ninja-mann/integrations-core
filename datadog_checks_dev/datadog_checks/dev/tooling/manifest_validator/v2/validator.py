@@ -54,7 +54,7 @@ class TileDescriptionValidator(BaseManifestValidator):
         if current_length > max_desc_length:
             output = (
                 f'  The tile description is {current_length} characters long. It should be no longer than '
-                f'{self.MAX_DESCRIPTION_LENGTH} characters.'
+                f'{max_desc_length} characters.'
             )
             self.fail(output)
 
@@ -234,8 +234,19 @@ class MediaGalleryValidator(BaseManifestValidator):
             self.fail(output)
 
 
-def get_v2_validators(ctx, is_extras, is_marketplace):
-    return [
+class ChangelogValidator(BaseManifestValidator):
+    def validate(self, check_name, decoded, fix):
+        tile = decoded.get('tile')
+        changelog = tile.get("changelog", None)
+
+        if changelog:
+            check_dir = os.path.join(get_root(), check_name)
+            if changelog not in os.listdir(check_dir):
+                self.fail(f"{os.path.join(check_name, changelog)} does not exist.")
+
+
+def get_v2_validators(ctx, is_extras, is_marketplace, ignore_schema=False):
+    validators = [
         common.MaintainerValidator(
             is_extras, is_marketplace, check_in_extras=False, check_in_marketplace=False, version=V2
         ),
@@ -244,8 +255,12 @@ def get_v2_validators(ctx, is_extras, is_marketplace):
         common.ImmutableAttributesValidator(version=V2),
         common.LogsCategoryValidator(version=V2),
         DisplayOnPublicValidator(version=V2),
-        TileDescriptionValidator(is_marketplace, is_extras, version=V2),
-        MediaGalleryValidator(is_marketplace, is_extras, version=V2),
-        # keep SchemaValidator last, and avoid running this validation if errors already found
-        SchemaValidator(ctx=ctx, version=V2, skip_if_errors=True),
+        TileDescriptionValidator(is_marketplace=is_marketplace, is_extras=is_extras, version=V2),
+        MediaGalleryValidator(is_marketplace=is_marketplace, is_extras=is_extras, version=V2),
+        ChangelogValidator(version=V2),
     ]
+    if not ignore_schema:
+        # keep SchemaValidator last, and avoid running this validation if errors already found
+        validators.append(SchemaValidator(ctx=ctx, version=V2, skip_if_errors=True))
+
+    return validators

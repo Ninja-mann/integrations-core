@@ -5,18 +5,16 @@
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import json
 import logging
-from collections import OrderedDict
-from typing import Any
+import os
+from typing import Any  # noqa: F401
 
 import mock
 import pytest
-from six import PY3
 
-from datadog_checks.base import AgentCheck
+from datadog_checks.base import AgentCheck, ConfigurationError, to_native_string
 from datadog_checks.base import __version__ as base_package_version
-from datadog_checks.base import to_native_string
-from datadog_checks.base.checks.base import datadog_agent
-from datadog_checks.dev.testing import requires_py3
+
+from .utils import BaseModelTest
 
 
 def test_instance():
@@ -420,7 +418,7 @@ class TestMetricNormalization:
     [
         ('nothing to normalize', 'abc:123', 'abc:123'),
         ('unicode', u'Klüft inför på fédéral', 'Klüft_inför_på_fédéral'),
-        ('invalid chars', 'foo,+*-/()[]{}  \t\nbar:123', 'foo_bar:123'),
+        ('invalid chars', 'foo,+*-/()[]{}-  \t\nbar:123', 'foo_bar:123'),
         ('leading and trailing underscores', '__abc:123__', 'abc:123'),
         ('redundant underscore', 'foo_____bar', 'foo_bar'),
         ('invalid chars and underscore', 'foo++__bar', 'foo_bar'),
@@ -544,6 +542,111 @@ class TestServiceChecks:
         aggregator.assert_service_check('service_check', status=AgentCheck.OK)
 
 
+class TestLogSubmission:
+    def test_cursor(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{}])
+        check.check_id = 'test'
+
+        check.send_log({'message': 'foo'}, cursor={'data': '1'})
+        check.send_log({'message': 'bar'}, cursor={'data': '2'})
+        check.send_log({'message': 'baz'})
+
+        datadog_agent.assert_logs(
+            check.check_id,
+            [
+                {'message': 'foo'},
+                {'message': 'bar'},
+                {'message': 'baz'},
+            ],
+        )
+        assert check.get_log_cursor() == {'data': '2'}
+
+    def test_no_cursor(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{}])
+        check.check_id = 'test'
+
+        check.send_log({'message': 'foo'})
+        check.send_log({'message': 'bar'})
+        check.send_log({'message': 'baz'})
+
+        datadog_agent.assert_logs(
+            check.check_id,
+            [
+                {'message': 'foo'},
+                {'message': 'bar'},
+                {'message': 'baz'},
+            ],
+        )
+        assert check.get_log_cursor() is None
+
+    def test_tags(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{'tags': ['foo:bar', 'baz:qux']}])
+        check.check_id = 'test'
+
+        check.send_log({'message': 'foo'})
+        check.send_log({'message': 'bar', 'ddtags': 'bar:baz'})
+        check.send_log({'message': 'baz'})
+
+        datadog_agent.assert_logs(
+            check.check_id,
+            [
+                {'message': 'foo', 'ddtags': 'baz:qux,foo:bar'},
+                {'message': 'bar', 'ddtags': 'bar:baz'},
+                {'message': 'baz', 'ddtags': 'baz:qux,foo:bar'},
+            ],
+        )
+
+    def test_stream(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{}])
+        check.check_id = 'test'
+
+        check.send_log({'message': 'foo'}, cursor={'data': '1'}, stream='stream1')
+        check.send_log({'message': 'bar'}, cursor={'data': '2'}, stream='stream2')
+        check.send_log({'message': 'baz'})
+
+        datadog_agent.assert_logs(
+            check.check_id,
+            [
+                {'message': 'foo'},
+                {'message': 'bar'},
+                {'message': 'baz'},
+            ],
+        )
+        assert check.get_log_cursor(stream='stream1') == {'data': '1'}
+        assert check.get_log_cursor(stream='stream2') == {'data': '2'}
+
+    def test_timestamp(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{}])
+        check.check_id = 'test'
+
+        check.send_log({'message': 'foo', 'timestamp': 1722958617.2842212})
+        check.send_log({'message': 'bar', 'timestamp': 1722958619.2358432})
+        check.send_log({'message': 'baz', 'timestamp': 1722958620.5963688})
+
+        datadog_agent.assert_logs(
+            check.check_id,
+            [
+                {'message': 'foo', 'timestamp': 1722958617284},
+                {'message': 'bar', 'timestamp': 1722958619235},
+                {'message': 'baz', 'timestamp': 1722958620596},
+            ],
+        )
+        assert check.get_log_cursor() is None
+
+
+class TestLogsEnabledDetection:
+    def test_default(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{}])
+
+        assert check.logs_enabled is False
+
+    def test_enabled(self, datadog_agent):
+        check = AgentCheck('check_name', {}, [{}])
+        datadog_agent._config['logs_enabled'] = True
+
+        assert check.logs_enabled is True
+
+
 class TestTags:
     def test_default_string(self):
         check = AgentCheck()
@@ -567,11 +670,7 @@ class TestTags:
 
         assert normalized_tags is not tags
 
-        if PY3:
-            assert normalized_tag == tag.decode('utf-8')
-        else:
-            # Ensure no new allocation occurs
-            assert normalized_tag is tag
+        assert normalized_tag == tag.decode('utf-8')
 
     def test_unicode_string(self):
         check = AgentCheck()
@@ -582,12 +681,7 @@ class TestTags:
         normalized_tag = normalized_tags[0]
 
         assert normalized_tags is not tags
-
-        if PY3:
-            # Ensure no new allocation occurs
-            assert normalized_tag is tag
-        else:
-            assert normalized_tag == tag.encode('utf-8')
+        assert normalized_tag is tag
 
     def test_unicode_device_name(self):
         check = AgentCheck()
@@ -597,7 +691,7 @@ class TestTags:
         normalized_tags = check._normalize_tags_type(tags, device_name)
         normalized_device_tag = normalized_tags[0]
 
-        assert isinstance(normalized_device_tag, str if PY3 else bytes)
+        assert isinstance(normalized_device_tag, str)
 
     def test_duplicated_device_name(self):
         check = AgentCheck()
@@ -625,15 +719,13 @@ class TestTags:
             check.set_external_tags(external_host_tags)
             assert external_host_tags == [('hostname', {'src_name': ['normalize:tag']})]
 
-    def test_external_hostname(self):
+    def test_external_hostname(self, datadog_agent):
         check = AgentCheck()
         external_host_tags = [(u'hostnam\xe9', {'src_name': ['key1:val1']})]
-        with mock.patch.object(datadog_agent, 'set_external_tags') as set_external_tags:
-            check.set_external_tags(external_host_tags)
-            if PY3:
-                set_external_tags.assert_called_with([(u'hostnam\xe9', {'src_name': ['key1:val1']})])
-            else:
-                set_external_tags.assert_called_with([('hostnam\xc3\xa9', {'src_name': ['key1:val1']})])
+        check.set_external_tags(external_host_tags)
+
+        datadog_agent.assert_external_tags(u'hostnam\xe9', {'src_name': ['key1:val1']})
+        datadog_agent.assert_external_tags_count(1)
 
     @pytest.mark.parametrize(
         "disable_generic_tags, expected_tags",
@@ -917,52 +1009,6 @@ class TestLimits:
 
 
 class TestCheckInitializations:
-    def test_default(self):
-        class TestCheck(AgentCheck):
-            def check(self, _):
-                pass
-
-        check = TestCheck('test', {}, [{}])
-        check.check_id = 'test:123'
-
-        with mock.patch('datadog_checks.base.stubs.datadog_agent.set_check_metadata') as m:
-            check.run()
-
-            assert m.call_count == 0
-
-    def test_default_config_sent(self):
-        class TestCheck(AgentCheck):
-            METADATA_DEFAULT_CONFIG_INIT_CONFIG = ['foo']
-            METADATA_DEFAULT_CONFIG_INSTANCE = ['bar']
-
-            def check(self, _):
-                pass
-
-        # Ordered by call order in `AgentCheck.send_config_metadata`
-        value_map = OrderedDict((('instance', 'mock'), ('init_config', 5)))
-
-        config = {'foo': value_map['init_config'], 'bar': value_map['instance']}
-        check = TestCheck('test', config, [config])
-        check.check_id = 'test:123'
-
-        with mock.patch('datadog_checks.base.stubs.datadog_agent.set_check_metadata') as m:
-            check.run()
-
-            assert m.call_count == 2
-            check.run()
-            assert m.call_count == 2
-
-            for (config_type, value), call_args in zip(value_map.items(), m.call_args_list):
-                args, _ = call_args
-                assert args[0] == 'test:123'
-                assert args[1] == 'config.{}'.format(config_type)
-
-                data = json.loads(args[2])[0]
-
-                assert data.pop('is_set', None) is True
-                assert data.pop('value', None) == value
-                assert not data
-
     def test_success_only_once(self):
         class TestCheck(AgentCheck):
             def __init__(self, *args, **kwargs):
@@ -1010,7 +1056,6 @@ class TestCheckInitializations:
         assert check.initialize.call_count == 2
 
 
-@requires_py3
 def test_load_configuration_models(dd_run_check, mocker):
     instance = {'endpoint': 'url', 'tags': ['foo:bar'], 'proxy': {'http': 'http://1.2.3.4:9000'}}
     init_config = {'proxy': {'https': 'https://1.2.3.4:4242'}}
@@ -1024,125 +1069,264 @@ def test_load_configuration_models(dd_run_check, mocker):
     instance_config = {}
     shared_config = {}
     package = mocker.MagicMock()
-    package.InstanceConfig = mocker.MagicMock(return_value=instance_config)
-    package.SharedConfig = mocker.MagicMock(return_value=shared_config)
+    package.InstanceConfig.model_validate = mocker.MagicMock(return_value=instance_config)
+    package.SharedConfig.model_validate = mocker.MagicMock(return_value=shared_config)
     import_module = mocker.patch('importlib.import_module', return_value=package)
 
     dd_run_check(check)
 
-    instance_data = check._get_config_model_initialization_data()
-    instance_data.update(instance)
-    init_config_data = check._get_config_model_initialization_data()
-    init_config_data.update(init_config)
-
     import_module.assert_called_with('datadog_checks.base.config_models')
-    package.InstanceConfig.assert_called_once_with(**instance_data)
-    package.SharedConfig.assert_called_once_with(**init_config_data)
+    package.InstanceConfig.model_validate.assert_called_once_with(
+        instance, context=check._get_config_model_context(instance)
+    )
+    package.SharedConfig.model_validate.assert_called_once_with(
+        init_config, context=check._get_config_model_context(init_config)
+    )
 
     assert check._config_model_instance is instance_config
     assert check._config_model_shared is shared_config
 
 
-@requires_py3
 @pytest.mark.parametrize(
-    'check_instance_config, default_instance_config, log_lines',
+    "check_instance_config, default_instance_config, log_lines, unknown_options",
     [
         pytest.param(
-            {'endpoint': 'url', 'tags': ['foo:bar'], 'proxy': {'http': 'http://1.2.3.4:9000'}},
+            {
+                "endpoint": "url",
+                "tags": ["foo:bar"],
+                "proxy": {"http": "http://1.2.3.4:9000"},
+            },
             [],
             None,
-            id='empty default',
+            [],
+            id="empty default",
         ),
         pytest.param(
-            {'endpoint': 'url', 'tags': ['foo:bar'], 'proxy': {'http': 'http://1.2.3.4:9000'}},
-            [('endpoint', 'url')],
+            {
+                "endpoint": "url",
+                "tags": ["foo:bar"],
+                "proxy": {"http": "http://1.2.3.4:9000"},
+            },
+            [
+                ("endpoint", "url"),
+            ],
             None,
-            id='no typo',
+            [],
+            id="no typo",
         ),
         pytest.param(
-            {'endpoints': 'url', 'tags': ['foo:bar'], 'proxy': {'http': 'http://1.2.3.4:9000'}},
-            [('endpoint', 'url')],
+            {
+                "endpoints": "url",
+                "tags": ["foo:bar"],
+                "proxy": {"http": "http://1.2.3.4:9000"},
+            },
+            [
+                ("endpoint", "url"),
+            ],
             [
                 (
-                    'Detected potential typo in configuration option in test/instance section: `endpoints`. '
-                    'Did you mean endpoint?'
+                    "Detected potential typo in configuration option in test/instance section: `endpoints`. "
+                    "Did you mean endpoint?"
                 )
             ],
-            id='typo',
+            ["endpoints"],
+            id="typo",
         ),
         pytest.param(
-            {'endpoints': 'url', 'tags': ['foo:bar'], 'proxy': {'http': 'http://1.2.3.4:9000'}},
-            [('endpoint', 'url'), ('endpoints', 'url')],
+            {
+                "endpoints": "url",
+                "tags": ["foo:bar"],
+                "proxy": {"http": "http://1.2.3.4:9000"},
+            },
+            [
+                ("endpoint", "url"),
+                ("endpoints", "url"),
+            ],
             None,
-            id='no typo similar option',
+            [],
+            id="no typo similar option",
         ),
         pytest.param(
-            {'endpont': 'url', 'tags': ['foo:bar'], 'proxy': {'http': 'http://1.2.3.4:9000'}},
-            [('endpoint', 'url'), ('endpoints', 'url')],
+            {
+                "endpont": "url",
+                "tags": ["foo:bar"],
+                "proxy": {"http": "http://1.2.3.4:9000"},
+            },
+            [
+                ("endpoint", "url"),
+                ("endpoints", "url"),
+            ],
             [
                 (
-                    'Detected potential typo in configuration option in test/instance section: `endpont`. '
-                    'Did you mean endpoint, or endpoints?'
+                    "Detected potential typo in configuration option in test/instance section: `endpont`. "
+                    "Did you mean endpoint, or endpoints?"
                 )
             ],
-            id='typo two candidates',
+            ["endpont"],
+            id="typo two candidates",
         ),
-        pytest.param({'tag': 'test'}, [('tags', 'test')], None, id='short option cant catch'),
         pytest.param(
-            {'testing_long_para': 'test'},
-            [('testing_long_param', 'test'), ('test_short_param', 'test')],
+            {
+                "tag": "test",
+            },
+            [
+                ("tags", "test"),
+            ],
+            None,
+            [],
+            id="short option cant catch",
+        ),
+        pytest.param(
+            {
+                "testing_long_para": "test",
+            },
+            [
+                ("testing_long_param", "test"),
+                ("test_short_param", "test"),
+            ],
             [
                 (
-                    'Detected potential typo in configuration option in test/instance section: `testing_long_para`. '
-                    'Did you mean testing_long_param?'
+                    "Detected potential typo in configuration option in test/instance section: `testing_long_para`. "
+                    "Did you mean testing_long_param?"
                 )
             ],
-            id='somewhat similar option',
+            ["testing_long_para"],
+            id="somewhat similar option",
         ),
         pytest.param(
-            {'send_distribution_sums_as_monotonic': False, 'exclude_labels': True},
-            [('send_distribution_counts_as_monotonic', True), ('include_labels', True)],
-            None,
-            id='different options no typos',
-        ),
-        pytest.param(
-            {'send_distribution_count_as_monotonic': True, 'exclude_label': True},
+            {
+                "send_distribution_sums_as_monotonic": False,
+                "exclude_labels": True,
+            },
             [
-                ('send_distribution_sums_as_monotonic', False),
-                ('send_distribution_counts_as_monotonic', True),
-                ('exclude_labels', False),
-                ('include_labels', True),
+                ("send_distribution_counts_as_monotonic", True),
+                ("include_labels", True),
+            ],
+            None,
+            [],
+            id="different options no typos",
+        ),
+        pytest.param(
+            {
+                "send_distribution_count_as_monotonic": True,
+                "exclude_label": True,
+            },
+            [
+                ("send_distribution_sums_as_monotonic", False),
+                ("send_distribution_counts_as_monotonic", True),
+                ("exclude_labels", False),
+                ("include_labels", True),
             ],
             [
                 (
-                    'Detected potential typo in configuration option in test/instance section: '
-                    '`send_distribution_count_as_monotonic`. Did you mean send_distribution_counts_as_monotonic?'
+                    "Detected potential typo in configuration option in test/instance section: "
+                    "`send_distribution_count_as_monotonic`. Did you mean send_distribution_counts_as_monotonic?"
                 ),
                 (
-                    'Detected potential typo in configuration option in test/instance section: `exclude_label`. '
-                    'Did you mean exclude_labels?'
+                    "Detected potential typo in configuration option in test/instance section: `exclude_label`. "
+                    "Did you mean exclude_labels?"
                 ),
             ],
-            id='different options typo',
+            [
+                "send_distribution_count_as_monotonic",
+                "exclude_label",
+            ],
+            id="different options typo",
+        ),
+        pytest.param(
+            {
+                "field": "value",
+                "schema": "my_schema",
+            },
+            BaseModelTest(field="my_field", schema_="the_schema"),
+            None,
+            [],
+            id="using an alias",
+        ),
+        pytest.param(
+            {
+                "field": "value",
+                "schem": "my_schema",
+            },
+            BaseModelTest(field="my_field", schema_="the_schema"),
+            [
+                (
+                    "Detected potential typo in configuration option in test/instance section: "
+                    "`schem`. Did you mean schema?"
+                ),
+            ],
+            ["schem"],
+            id="typo in an alias",
+        ),
+        pytest.param(
+            {
+                "field": "value",
+                "schema_": "my_schema",
+            },
+            BaseModelTest(field="my_field", schema_="the_schema"),
+            None,
+            [],
+            id="not using an alias",
         ),
     ],
 )
 def test_detect_typos_configuration_models(
-    dd_run_check, mocker, caplog, check_instance_config, default_instance_config, log_lines
+    dd_run_check,
+    caplog,
+    check_instance_config,
+    default_instance_config,
+    log_lines,
+    unknown_options,
 ):
     caplog.clear()
     caplog.set_level(logging.WARNING)
     empty_config = {}
-    default_instance = mocker.MagicMock()
-    default_instance.__iter__ = mocker.MagicMock(return_value=iter(default_instance_config))
 
-    check = AgentCheck('test', empty_config, [check_instance_config])
-    check.check_id = 'test:123'
+    check = AgentCheck("test", empty_config, [check_instance_config])
+    check.check_id = "test:123"
 
-    check.log_typos_in_options(check_instance_config, default_instance, 'instance')
+    typos = check.log_typos_in_options(check_instance_config, default_instance_config, "instance")
 
     if log_lines is not None:
         for log_line in log_lines:
             assert log_line in caplog.text
     else:
-        assert 'Detected potential typo in configuration option' not in caplog.text
+        assert "Detected potential typo in configuration option" not in caplog.text
+
+    assert typos == set(unknown_options)
+
+
+def test_env_var_logic_default():
+    with mock.patch.dict('os.environ', {'GOFIPS': '0'}):
+        AgentCheck()
+        assert os.getenv('OPENSSL_CONF', None) is None
+        assert os.getenv('OPENSSL_MODULES', None) is None
+
+
+def test_env_var_logic_preset():
+    preset_conf = 'path/to/openssl.cnf'
+    preset_modules = 'path/to/ossl-modules'
+    with mock.patch.dict('os.environ', {'GOFIPS': '1', 'OPENSSL_CONF': preset_conf, 'OPENSSL_MODULES': preset_modules}):
+        AgentCheck()
+        assert os.getenv('OPENSSL_CONF', None) == preset_conf
+        assert os.getenv('OPENSSL_MODULES', None) == preset_modules
+
+
+def test_ha_enabled_and_unsupported():
+    class TestNonHACheck(AgentCheck):
+        HA_SUPPORTED = False
+
+    TestNonHACheck('test', {}, [{}])
+    with pytest.raises(ConfigurationError):
+        TestNonHACheck('test', {'ha_enabled': True}, [{}])
+    with pytest.raises(ConfigurationError):
+        TestNonHACheck('test', {}, [{'ha_enabled': True}])
+
+
+def test_ha_enabled_and_supported():
+    class TestHACheck(AgentCheck):
+        HA_SUPPORTED = True
+
+    TestHACheck('test', {}, [{}])
+    TestHACheck('test', {'ha_enabled': True}, [{}])
+    TestHACheck('test', {}, [{'ha_enabled': True}])

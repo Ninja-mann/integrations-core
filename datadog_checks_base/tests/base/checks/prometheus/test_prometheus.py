@@ -10,8 +10,6 @@ from collections import OrderedDict
 import mock
 import pytest
 import requests
-from six import iteritems, iterkeys
-from six.moves import range
 
 from datadog_checks.checks.prometheus import PrometheusCheck, UnknownFormatError
 from datadog_checks.utils.prometheus import metrics_pb2, parse_metric_family
@@ -242,11 +240,11 @@ def test_parse_metric_family_text(text_data, mocked_prometheus_check):
         _h = _histo.metric.add()
         _h.histogram.sample_count = _data['ct']
         _h.histogram.sample_sum = _data['sum']
-        for k, v in list(iteritems(_data['lbl'])):
+        for k, v in _data['lbl'].items():
             _lh = _h.label.add()
             _lh.name = k
             _lh.value = v
-        for _b in sorted(iterkeys(_data['buckets'])):
+        for _b in sorted(_data['buckets']):
             _subh = _h.histogram.bucket.add()
             _subh.upper_bound = _b
             _subh.cumulative_count = _data['buckets'][_b]
@@ -631,7 +629,7 @@ def test_filter_sample_on_gauge(p_check):
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
     check._text_filter_blacklist = ["deployment=\"kube-dns\""]
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
     current_metric = metrics[0]
@@ -664,7 +662,7 @@ def test_parse_one_gauge(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
     current_metric = metrics[0]
@@ -707,7 +705,7 @@ def test_parse_one_counter(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
     current_metric = metrics[0]
@@ -781,7 +779,7 @@ def test_parse_one_histograms_with_label(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
     current_metric = metrics[0]
@@ -916,7 +914,7 @@ def test_parse_one_histogram(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
     current_metric = metrics[0]
@@ -1039,7 +1037,7 @@ def test_parse_two_histograms_with_label(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
 
@@ -1125,7 +1123,7 @@ def test_parse_one_summary(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
     current_metric = metrics[0]
@@ -1210,7 +1208,7 @@ def test_parse_two_summaries_with_labels(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
 
     assert 1 == len(metrics)
 
@@ -1269,7 +1267,7 @@ def test_parse_one_summary_with_none_values(p_check):
     # Iter on the generator to get all metrics
     response = MockResponse(text_data, 'text/plain; version=0.0.4')
     check = p_check
-    metrics = [k for k in check.parse_metric_family(response)]
+    metrics = list(check.parse_metric_family(response))
     assert 1 == len(metrics)
     current_metric = metrics[0]
     # As the NaN value isn't supported when we are calling assertEqual
@@ -1959,14 +1957,16 @@ def test_text_filter_input():
     ]
     expected_out = ["line with string3", "line with string"]
 
-    filtered = [x for x in check._text_filter_input(lines_in)]
+    filtered = list(check._text_filter_input(lines_in))
     assert filtered == expected_out
 
 
 def test_ssl_verify_not_raise_warning(caplog, mocked_prometheus_check, text_data):
+    from datadog_checks.dev.http import MockResponse
+
     check = mocked_prometheus_check
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG), mock.patch('requests.get', return_value=MockResponse('httpbin.org')):
         resp = check.poll('https://httpbin.org/get')
 
     assert 'httpbin.org' in resp.content.decode('utf-8')
@@ -1977,10 +1977,12 @@ def test_ssl_verify_not_raise_warning(caplog, mocked_prometheus_check, text_data
 
 
 def test_ssl_verify_not_raise_warning_cert_false(caplog, mocked_prometheus_check, text_data):
+    from datadog_checks.dev.http import MockResponse
+
     check = mocked_prometheus_check
     check.ssl_ca_cert = False
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG), mock.patch('requests.get', return_value=MockResponse('httpbin.org')):
         resp = check.poll('https://httpbin.org/get')
 
     assert 'httpbin.org' in resp.content.decode('utf-8')

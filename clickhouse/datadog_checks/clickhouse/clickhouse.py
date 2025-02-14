@@ -2,7 +2,6 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import clickhouse_driver
-from six import raise_from
 
 from datadog_checks.base import AgentCheck, ConfigurationError, is_affirmative
 from datadog_checks.base.utils.db import QueryManager
@@ -27,6 +26,8 @@ class ClickhouseCheck(AgentCheck):
         self._read_timeout = float(self.instance.get('read_timeout', 10))
         self._compression = self.instance.get('compression', False)
         self._tls_verify = is_affirmative(self.instance.get('tls_verify', False))
+        self._tls_ca_cert = self.instance.get('tls_ca_cert', None)
+        self._verify = self.instance.get('verify', True)
         self._tags = self.instance.get('tags', [])
 
         # Add global tags
@@ -61,11 +62,12 @@ class ClickhouseCheck(AgentCheck):
         self._query_manager.execute()
         self.collect_version()
 
+    @AgentCheck.metadata_entrypoint
     def collect_version(self):
         version = list(self.execute_query_raw('SELECT version()'))[0][0]
 
         # The version comes in like `19.15.2.2` though sometimes there is no patch part
-        version_parts = {name: part for name, part in zip(('year', 'major', 'minor', 'patch'), version.split('.'))}
+        version_parts = dict(zip(('year', 'major', 'minor', 'patch'), version.split('.')))
 
         self.set_metadata('version', version, scheme='parts', final_scheme='calver', part_map=version_parts)
 
@@ -108,6 +110,8 @@ class ClickhouseCheck(AgentCheck):
                 sync_request_timeout=self._connect_timeout,
                 compression=self._compression,
                 secure=self._tls_verify,
+                ca_certs=self._tls_ca_cert,
+                verify=self._verify,
                 settings={},
                 # Make every client unique for server logs
                 client_name='datadog-{}'.format(self.check_id),
@@ -118,10 +122,7 @@ class ClickhouseCheck(AgentCheck):
                 self._error_sanitizer.clean(self._error_sanitizer.scrub(str(e)))
             )
             self.service_check(self.SERVICE_CHECK_CONNECT, self.CRITICAL, message=error, tags=self._tags)
-
-            # When an exception is raised in the context of another one, both will be printed. To avoid
-            # this we set the context to None. https://www.python.org/dev/peps/pep-0409/
-            raise_from(type(e)(error), None)
+            raise type(e)(error) from None
         else:
             self.service_check(self.SERVICE_CHECK_CONNECT, self.OK, tags=self._tags)
             self._client = client

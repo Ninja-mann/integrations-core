@@ -1,51 +1,96 @@
 {
-  "categories": [
-    "containers",
-    "orchestration",
-    "configuration & deployment",
-    "notification",
-    "log collection",
-    "autodiscovery"
-  ],
-  "creates_events": true,
-  "display_name": "Consul",
-  "guid": "ec1e9fac-a339-49a3-b501-60656d2a5671",
-  "is_public": true,
-  "maintainer": "help@datadoghq.com",
-  "manifest_version": "1.0.0",
-  "metric_prefix": "consul.",
-  "metric_to_check": "consul.peers",
-  "name": "consul",
-  "process_signatures": [
-    "consul agent",
-    "consul_agent",
-    "consul-agent"
-  ],
-  "public_title": "Consul Integration",
-  "short_description": "Alert on Consul health checks, see service-to-node mappings, and much more.",
-  "support": "core",
-  "supported_os": [
-    "linux",
-    "mac_os",
-    "windows"
-  ],
-  "type": "check",
-  "integration_id": "consul",
+  "manifest_version": "2.0.0",
+  "app_uuid": "d0b52e9d-6594-4ff5-9b66-800943f75756",
+  "app_id": "consul",
+  "display_on_public_website": true,
+  "tile": {
+    "overview": "README.md#Overview",
+    "configuration": "README.md#Setup",
+    "support": "README.md#Support",
+    "changelog": "CHANGELOG.md",
+    "description": "Alert on Consul health checks, see service-to-node mappings, and much more.",
+    "title": "Consul",
+    "media": [],
+    "classifier_tags": [
+      "Category::Configuration & Deployment",
+      "Category::Containers",
+      "Category::Log Collection",
+      "Category::Network",
+      "Category::Notifications",
+      "Category::Orchestration",
+      "Supported OS::Linux",
+      "Supported OS::Windows",
+      "Supported OS::macOS",
+      "Offering::Integration"
+    ],
+    "resources": [
+      {
+        "resource_type": "documentation",
+        "url": "https://docs.datadoghq.com/integrations/guide/hcp-consul"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/monitor-consul-health-and-performance-with-datadog"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/engineering/consul-at-datadog/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/consul-metrics/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/consul-monitoring-tools/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/consul-datadog/"
+      }
+    ]
+  },
+  "author": {
+    "support_email": "help@datadoghq.com",
+    "name": "Datadog",
+    "homepage": "https://www.datadoghq.com",
+    "sales_email": "info@datadoghq.com"
+  },
   "assets": {
-    "configuration": {
-      "spec": "assets/configuration/spec.yaml"
+    "integration": {
+      "source_type_name": "Consul",
+      "configuration": {
+        "spec": "assets/configuration/spec.yaml"
+      },
+      "events": {
+        "creates_events": true
+      },
+      "metrics": {
+        "prefix": "consul.",
+        "check": "consul.peers",
+        "metadata_path": "metadata.csv"
+      },
+      "service_checks": {
+        "metadata_path": "assets/service_checks.json"
+      },
+      "process_signatures": [
+        "consul agent",
+        "consul_agent",
+        "consul-agent"
+      ],
+      "source_type_id": 122,
+      "auto_install": true
     },
-    "monitors": {},
     "dashboards": {
-      "consul": "assets/dashboards/consul_dashboard.json"
+      "consul": "assets/dashboards/consul_overview.json"
     },
-    "service_checks": "assets/service_checks.json",
-    "logs": {
-      "source": "consul"
+    "monitors": {
+      "consul service status": "assets/monitors/consul_status.json"
     },
-    "metrics_metadata": "metadata.csv",
     "saved_views": {
-      "consul_processes": "assets/saved_views/consul_processes.json"
+      "consul_processes": "assets/saved_views/consul_processes.json",
+      "consul_errors": "assets/saved_views/consul_errors.json",
+      "consul_overview": "assets/saved_views/consul_overview.json"
     }
   }
 }

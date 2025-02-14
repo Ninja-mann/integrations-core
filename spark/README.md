@@ -1,5 +1,10 @@
 # Spark Check
 
+<div class="alert alert-warning">
+<a href="https://docs.datadoghq.com/data_jobs/">Data Jobs Monitoring</a> helps you observe, troubleshoot, and cost-optimize your Spark and Databricks jobs and clusters.<br/><br/>
+This page only documents how to ingest Spark metrics and logs. 
+</div>
+
 ![Spark Graph][1]
 
 ## Overview
@@ -120,15 +125,20 @@ For Agent v5, create the `/etc/dd-agent/conf.d/spark.yaml` configuration file wi
 
 For Agent v6/7, create the `/etc/datadog-agent/conf.d/spark.d/conf.yaml` configuration file with the [proper values on each EMR node][14].
 
+### Successful check but no metrics are collected
+
+The Spark integration only collects metrics about running apps. If you have no currently running apps, the check will just submit a health check.
+
 ## Further Reading
 
 Additional helpful documentation, links, and articles:
 
 - [Hadoop and Spark monitoring with Datadog][15]
+- [Monitoring Apache Spark applications running on Amazon EMR][16]
 
 [1]: https://raw.githubusercontent.com/DataDog/integrations-core/master/spark/images/sparkgraph.png
 [2]: https://spark.apache.org/
-[3]: https://app.datadoghq.com/account/settings#agent
+[3]: https://app.datadoghq.com/account/settings/agent/latest
 [4]: https://docs.datadoghq.com/agent/guide/agent-configuration-files/#agent-configuration-directory
 [5]: https://github.com/DataDog/integrations-core/blob/master/spark/datadog_checks/spark/data/conf.yaml.example
 [6]: https://docs.datadoghq.com/agent/guide/agent-commands/#start-stop-and-restart-the-agent
@@ -141,3 +151,4 @@ Additional helpful documentation, links, and articles:
 [13]: https://docs.datadoghq.com/agent/
 [14]: https://docs.aws.amazon.com/emr/latest/ManagementGuide/emr-connect-master-node-ssh.html
 [15]: https://www.datadoghq.com/blog/monitoring-spark
+[16]: https://www.datadoghq.com/blog/spark-emr-monitoring/ 

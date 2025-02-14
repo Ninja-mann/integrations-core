@@ -5,18 +5,19 @@ from __future__ import division
 
 from collections import defaultdict
 from contextlib import closing
+from datetime import datetime
 from itertools import chain
 
 import certifi
 
 from datadog_checks.base.errors import CheckException
+from datadog_checks.base.utils.common import exclude_undefined_keys
+from datadog_checks.base.utils.time import get_timestamp
 
 try:
     from hdbcli.dbapi import Connection as HanaConnection
 except ImportError:
     HanaConnection = None
-from six import iteritems
-from six.moves import zip
 
 from datadog_checks.base import AgentCheck, is_affirmative
 from datadog_checks.base.utils.common import total_time_to_temporal_percent
@@ -45,6 +46,7 @@ class SapHanaCheck(AgentCheck):
         self._tags = self.instance.get('tags', [])
         self._use_tls = self.instance.get('use_tls', False)
         self._only_custom_queries = is_affirmative(self.instance.get('only_custom_queries', False))
+        self._schema = self.instance.get('schema', "SYS_DATABASES")
 
         # Add server & port tags
         self._tags.append('server:{}'.format(self._server))
@@ -70,6 +72,7 @@ class SapHanaCheck(AgentCheck):
 
         # Whether or not the connection was lost
         self._connection_lost = False
+        self._connection_flaked = False
 
         # Whether or not to persist database connection. Default is True
         self._persist_db_connections = self.instance.get(
@@ -86,7 +89,6 @@ class SapHanaCheck(AgentCheck):
         self.check_initializations.append(self.set_default_methods)
 
     def check(self, _):
-
         if self._only_custom_queries:
             query_methods = [self.query_custom]
         else:
@@ -104,13 +106,16 @@ class SapHanaCheck(AgentCheck):
                 try:
                     query_method()
                 except QueryExecutionError as e:
-                    self.log.error('Error querying %s: %s', e.source(), str(e))
+                    self.log.error('Error querying %s: %s', e.source, str(e))
                     continue
                 except Exception as e:
                     self.log.exception('Unexpected error running `%s`: %s', query_method.__name__, str(e))
                     continue
         finally:
             if self._connection_lost:
+                self.service_check(
+                    self.SERVICE_CHECK_CONNECT, self.WARNING, message="Lost connection to HANA server", tags=self._tags
+                )
                 try:
                     self._conn.close()
                 except OperationalError:
@@ -124,6 +129,14 @@ class SapHanaCheck(AgentCheck):
                 except OperationalError:
                     self.log.error("Could not close connection.")
                 self._conn = None
+            if self._connection_flaked:
+                self.service_check(
+                    self.SERVICE_CHECK_CONNECT,
+                    self.WARNING,
+                    message="Session has been reconnected after an error",
+                    tags=self._tags,
+                )
+                self._connection_flaked = False
 
     def set_default_methods(self):
         self._default_methods.extend(
@@ -143,10 +156,13 @@ class SapHanaCheck(AgentCheck):
             ]
         )
 
+        if self.logs_enabled:
+            self._default_methods.append(self.query_audit_logs)
+
     def query_master_database(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/20ae63aa7519101496f6b832ec86afbd.html
         # Only 1 database
-        for master in self.iter_rows(queries.MasterDatabase):
+        for master in self.iter_rows(queries.MasterDatabase()):
             tags = ['db:{}'.format(master['db_name']), 'usage:{}'.format(master['usage'])]
             tags.extend(self._tags)
 
@@ -165,19 +181,41 @@ class SapHanaCheck(AgentCheck):
 
     def query_database_status(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/dbbdc0d96675470e80801c5ddfb8d348.html
-        for status in self.iter_rows(queries.SystemDatabases):
+        for status in self.iter_rows(queries.SystemDatabases()):
             tags = ['db:{}'.format(status['db_name'])]
             tags.extend(self._tags)
 
             db_status = self.OK if status['status'].lower() == 'yes' else self.CRITICAL
-            message = status['details'] or None
+            message = None
+            if db_status != self.OK and status.get('details'):
+                message = status['details']
             self.service_check(
                 self.SERVICE_CHECK_STATUS, db_status, message=message, tags=tags, hostname=self.get_hana_hostname()
             )
 
+    def query_audit_logs(self):
+        previous_cursor = self.get_log_cursor()
+        previous_timestamp = previous_cursor['timestamp'] if previous_cursor is not None else None
+
+        # https://help.sap.com/docs/SAP_HANA_PLATFORM/4fe29514fd584807ac9f2a04f6754767/d1fe1244d29510148f69be8b0e060dcc.html
+        for audit_log in self.iter_rows(queries.AuditLog(previous_timestamp=previous_timestamp)):
+            data = exclude_undefined_keys(audit_log)
+
+            data['status'] = data.pop('event_level')
+            data['timestamp'] = get_timestamp(data['timestamp'])
+
+            message = '{} {}'.format(data['event_action'], data['event_status'])
+            if 'comment' in data:
+                message += ' | {}'.format(data['comment'])
+            data['message'] = message
+
+            # https://help.sap.com/docs/SAP_HANA_PLATFORM/4fe29514fd584807ac9f2a04f6754767/3f81ccc7e35d44cbbc595c7d552c202a.html
+            new_timestamp = datetime.strftime(audit_log['timestamp'], '%Y-%m-%d %H:%M:%S.%f')
+            self.send_log(data, cursor={'timestamp': new_timestamp})
+
     def query_backup_status(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/783108ba8b8b4c709959220b4535a010.html
-        for backup in self.iter_rows(queries.GlobalSystemBackupProgress):
+        for backup in self.iter_rows(queries.GlobalSystemBackupProgress(schema=self._schema)):
             tags = [
                 'db:{}'.format(backup['db_name']),
                 'service_name:{}'.format(backup['service']),
@@ -194,7 +232,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_licenses(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/1d7e7f52f6574a238c137e17b0840673.html
-        for hana_license in self.iter_rows(queries.GlobalSystemLicenses):
+        for hana_license in self.iter_rows(queries.GlobalSystemLicenses(schema=self._schema)):
             tags = ['sid:{}'.format(hana_license['sid']), 'product_name:{}'.format(hana_license['product_name'])]
             tags.extend(self._tags)
 
@@ -222,10 +260,10 @@ class SapHanaCheck(AgentCheck):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.05/en-US/20abcf1f75191014a254a82b3d0f66bf.html
         # Documented statuses: RUNNING, IDLE, QUEUING, EMPTY
         db_counts = defaultdict(lambda: defaultdict(int))
-        for conn in self.iter_rows(queries.GlobalSystemConnectionsStatus):
+        for conn in self.iter_rows(queries.GlobalSystemConnectionsStatus(schema=self._schema)):
             db_counts[(conn['db_name'], conn['host'], conn['port'])][conn['status'].lower()] += conn['total']
 
-        for (db, host, port), counts in iteritems(db_counts):
+        for (db, host, port), counts in db_counts.items():
             tags = ['db:{}'.format(db), 'hana_port:{}'.format(port)]
             tags.extend(self._tags)
             tags.append('hana_host:{}'.format(host))
@@ -244,7 +282,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_disk_usage(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/a2aac2ee72b341699fa8eb3988d8cecb.html
-        for disk in self.iter_rows(queries.GlobalSystemDiskUsage):
+        for disk in self.iter_rows(queries.GlobalSystemDiskUsage(schema=self._schema)):
             tags = ['db:{}'.format(disk['db_name']), 'resource_type:{}'.format(disk['resource'])]
             tags.extend(self._tags)
 
@@ -266,7 +304,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_service_memory(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/20bf33c975191014bc16d7ffb7717db2.html
-        for memory in self.iter_rows(queries.GlobalSystemServiceMemory):
+        for memory in self.iter_rows(queries.GlobalSystemServiceMemory(schema=self._schema)):
             tags = [
                 'db:{}'.format(memory['db_name'] or 'none'),
                 'hana_port:{}'.format(memory['port']),
@@ -335,7 +373,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_service_component_memory(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/20bed4f675191014a4cf8e62c28d16ae.html
-        for memory in self.iter_rows(queries.GlobalSystemServiceComponentMemory):
+        for memory in self.iter_rows(queries.GlobalSystemServiceComponentMemory(schema=self._schema)):
             tags = [
                 'db:{}'.format(memory['db_name'] or 'none'),
                 'hana_port:{}'.format(memory['port']),
@@ -351,7 +389,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_row_store_memory(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/20bb47a975191014b1e2f6bd0a685d7b.html
-        for memory in self.iter_rows(queries.GlobalSystemRowStoreMemory):
+        for memory in self.iter_rows(queries.GlobalSystemRowStoreMemory(schema=self._schema)):
             tags = [
                 'db:{}'.format(memory['db_name']),
                 'hana_port:{}'.format(memory['port']),
@@ -377,7 +415,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_service_statistics(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/20c460be751910149173ac5c08d42be5.html
-        for service in self.iter_rows(queries.GlobalSystemServiceStatistics):
+        for service in self.iter_rows(queries.GlobalSystemServiceStatistics(schema=self._schema)):
             tags = [
                 'db:{}'.format(service['db_name'] or 'none'),
                 'hana_port:{}'.format(service['port']),
@@ -433,7 +471,7 @@ class SapHanaCheck(AgentCheck):
 
     def query_volume_io(self):
         # https://help.sap.com/viewer/4fe29514fd584807ac9f2a04f6754767/2.0.02/en-US/20cadec8751910148bab98528e3634a9.html
-        for volume in self.iter_rows(queries.GlobalSystemVolumeIO):
+        for volume in self.iter_rows(queries.GlobalSystemVolumeIO(schema=self._schema)):
             tags = [
                 'db:{}'.format(volume['db_name']),
                 'hana_port:{}'.format(volume['port']),
@@ -554,7 +592,7 @@ class SapHanaCheck(AgentCheck):
     def iter_rows(self, query, implicit_values=True):
         # https://github.com/SAP/PyHDB
         with closing(self._conn.cursor()) as cursor:
-            self.execute_query(cursor, query.query, lambda: ', '.join(sorted(query.views)))
+            self.execute_query(cursor, query.query, "{}.{}".format(query.schema, query.view))
 
             # Re-use column access map for efficiency
             result = {}
@@ -594,6 +632,9 @@ class SapHanaCheck(AgentCheck):
             error = str(e)
             if 'Lost connection to HANA server' in error:
                 self._connection_lost = True
+            if 'Session has been reconnected' in error:
+                # No need to attempt a reconnect in this case but some metrics will be missing
+                self._connection_flaked = True
 
             raise QueryExecutionError(error, source)
 

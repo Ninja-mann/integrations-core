@@ -6,10 +6,10 @@ from itertools import chain
 
 import mock
 import pytest
-from six import iteritems
 
 from datadog_checks.base.utils.platform import Platform
 from datadog_checks.base.utils.timeout import TimeoutException
+from datadog_checks.dev.utils import get_metadata_metrics
 from datadog_checks.disk import Disk
 from datadog_checks.disk.disk import IGNORE_CASE
 
@@ -23,7 +23,7 @@ def test_default_options():
     assert check._use_mount is False
     assert check._all_partitions is False
     assert check._file_system_include is None
-    assert check._file_system_exclude == re.compile('iso9660$', re.I)
+    assert check._file_system_exclude == re.compile('iso9660$|tracefs$', re.I)
     assert check._device_include is None
     assert check._device_exclude is None
     assert check._mount_point_include is None
@@ -64,10 +64,10 @@ def test_default(aggregator, gauge_metrics, rate_metrics, count_metrics, dd_run_
         else:
             tags = []
 
-        for name, value in iteritems(gauge_metrics):
+        for name, value in gauge_metrics.items():
             aggregator.assert_metric(name, value=value, count=1, metric_type=aggregator.GAUGE, tags=tags)
 
-        for name, value in iteritems(rate_metrics):
+        for name, value in rate_metrics.items():
             aggregator.assert_metric(
                 name,
                 value=value,
@@ -76,7 +76,7 @@ def test_default(aggregator, gauge_metrics, rate_metrics, count_metrics, dd_run_
                 tags=['device:{}'.format(DEFAULT_DEVICE_NAME), 'device_name:{}'.format(DEFAULT_DEVICE_BASE_NAME)],
             )
 
-        for name, value in iteritems(count_metrics):
+        for name, value in count_metrics.items():
             aggregator.assert_metric(
                 name,
                 value=value,
@@ -109,14 +109,14 @@ def test_use_mount(aggregator, instance_basic_mount, gauge_metrics, rate_metrics
     c = Disk('disk', {}, [instance_basic_mount])
     dd_run_check(c)
 
-    for name, value in iteritems(gauge_metrics):
+    for name, value in gauge_metrics.items():
         aggregator.assert_metric(
             name,
             value=value,
             tags=['device:{}'.format(DEFAULT_MOUNT_POINT), 'device_name:{}'.format(DEFAULT_DEVICE_BASE_NAME)],
         )
 
-    for name, value in chain(iteritems(rate_metrics), iteritems(count_metrics)):
+    for name, value in chain(rate_metrics.items(), count_metrics.items()):
         aggregator.assert_metric(
             name,
             value=value,
@@ -124,6 +124,7 @@ def test_use_mount(aggregator, instance_basic_mount, gauge_metrics, rate_metrics
         )
 
     aggregator.assert_all_metrics_covered()
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 @pytest.mark.usefixtures('psutil_mocks')
@@ -153,23 +154,15 @@ def test_device_tagging(aggregator, gauge_metrics, rate_metrics, count_metrics, 
         'device_label:mylab',
     ]
 
-    for name, value in iteritems(gauge_metrics):
-        aggregator.assert_metric(name, value=value, tags=tags)
-
-    for name, value in chain(iteritems(rate_metrics), iteritems(count_metrics)):
+    for name, value in chain(gauge_metrics.items(), rate_metrics.items(), count_metrics.items()):
         aggregator.assert_metric(
             name,
             value=value,
-            tags=[
-                'device:{}'.format(DEFAULT_DEVICE_NAME),
-                'device_name:{}'.format(DEFAULT_DEVICE_BASE_NAME),
-                'optional:tags1',
-                'label:mylab',
-                'device_label:mylab',
-            ],
+            tags=tags,
         )
 
     aggregator.assert_all_metrics_covered()
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 def test_get_devices_label():
@@ -253,6 +246,7 @@ def test_min_disk_size(aggregator, gauge_metrics, rate_metrics, count_metrics, d
         aggregator.assert_metric_has_tag(name, 'device_name:{}'.format(DEFAULT_DEVICE_BASE_NAME))
 
     aggregator.assert_all_metrics_covered()
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 @pytest.mark.skipif(not Platform.is_linux(), reason='disk labels are only available on Linux')
@@ -274,6 +268,7 @@ def test_labels_from_blkid_cache_file(
         aggregator.assert_metric(
             metric, tags=['device:/dev/sda1', 'device_name:sda1', 'label:MYLABEL', 'device_label:MYLABEL']
         )
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 @pytest.mark.skipif(not Platform.is_linux(), reason='disk labels are only available on Linux')
@@ -293,6 +288,7 @@ def test_blkid_cache_file_contains_no_labels(
     dd_run_check(c)
     for metric in chain(gauge_metrics, rate_metrics, count_metrics):
         aggregator.assert_metric(metric, tags=['device:/dev/sda1', 'device_name:sda1'])
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 @pytest.mark.usefixtures('psutil_mocks')
@@ -351,6 +347,7 @@ def test_timeout_warning(aggregator, gauge_metrics, rate_metrics, count_metrics,
         aggregator.assert_metric_has_tag(name, 'device_name:{}'.format(DEFAULT_DEVICE_BASE_NAME))
 
     aggregator.assert_all_metrics_covered()
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 @pytest.mark.usefixtures('psutil_mocks')

@@ -7,6 +7,7 @@ from datadog_checks.avi_vantage import AviVantageCheck
 from datadog_checks.dev.utils import get_metadata_metrics
 
 
+@pytest.mark.unit
 def test_check(mock_client, get_expected_metrics, aggregator, unit_instance, dd_run_check):
     check = AviVantageCheck('avi_vantage', {}, [unit_instance])
     dd_run_check(check)
@@ -17,6 +18,7 @@ def test_check(mock_client, get_expected_metrics, aggregator, unit_instance, dd_
     aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
+@pytest.mark.integration
 def test_integration(
     dd_environment, get_expected_metrics, aggregator, integration_instance, dd_run_check, datadog_agent
 ):
@@ -39,12 +41,12 @@ def test_integration(
 
 
 @pytest.mark.e2e
-def test_e2e(dd_agent_check, datadog_agent, integration_instance, get_expected_metrics):
+def test_e2e(dd_agent_check, integration_instance, get_expected_metrics):
     aggregator = dd_agent_check(integration_instance)
 
     aggregator.assert_service_check("avi_vantage.can_connect", AviVantageCheck.OK)
     for metric in get_expected_metrics(endpoint='http://localhost:5000/'):
         aggregator.assert_metric(metric['name'], metric['value'], metric['tags'], metric_type=metric['type'])
+
     aggregator.assert_all_metrics_covered()
     aggregator.assert_metrics_using_metadata(get_metadata_metrics())
-    datadog_agent.assert_metadata_count(5)

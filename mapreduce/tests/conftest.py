@@ -63,9 +63,7 @@ def mocked_auth_request():
 
 
 def get_custom_hosts():
-    # creat a mapping of mapreduce hostnames to localhost for DNS resolution
-    custom_hosts = [(host, '127.0.0.1') for host in MOCKED_E2E_HOSTS]
-    return custom_hosts
+    return [(host, '127.0.0.1') for host in MOCKED_E2E_HOSTS]
 
 
 def requests_get_mock(*args, **kwargs):
@@ -81,20 +79,19 @@ def requests_get_mock(*args, **kwargs):
                 "Apps URL must have the two query parameters: states=RUNNING and applicationTypes=MAPREDUCE"
             )
 
-    elif url == MR_JOBS_URL:
+    if url == MR_JOBS_URL:
         return MockResponse(file_path=os.path.join(HERE, "fixtures", "job_metrics"))
 
-    elif url == MR_JOB_COUNTERS_URL:
+    if url == MR_JOB_COUNTERS_URL:
         return MockResponse(file_path=os.path.join(HERE, "fixtures", "job_counter_metrics"))
 
-    elif url == MR_TASKS_URL:
+    if url == MR_TASKS_URL:
         return MockResponse(file_path=os.path.join(HERE, "fixtures", "task_metrics"))
 
-    elif url == CLUSTER_INFO_URL:
+    if url == CLUSTER_INFO_URL:
         return MockResponse(file_path=os.path.join(HERE, "fixtures", "cluster_info"))
 
-    else:
-        raise Exception("There is no mock request for {}".format(url))
+    raise Exception("There is no mock request for {}".format(url))
 
 
 def requests_auth_mock(*args, **kwargs):

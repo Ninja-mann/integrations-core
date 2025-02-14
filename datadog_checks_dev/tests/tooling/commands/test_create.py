@@ -3,7 +3,6 @@
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import os
 import sys
-import time
 
 import pytest
 
@@ -15,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 
 
+@pytest.mark.skipif(sys.version_info[0] == 2, reason='Not supported on Python 2')
 @pytest.mark.parametrize(
     'integration_type, installable', [('check', True), ('jmx', True), ('tile', False), ('logs', False)]
 )
@@ -66,6 +66,4 @@ def test_new_check_test(integration_type, installable):
             # See: https://github.com/pypa/pip/issues/3016
             assert 'WARNING: Skipping' not in result.stdout
     finally:
-        for _ in range(5):
-            time.sleep(5)
-            remove_path(check_path)
+        remove_path(check_path)

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 from ...errors import SubprocessError
 from ...subprocess import run_command
-from ...utils import ON_WINDOWS, file_exists, find_free_port, get_ip, path_join
+from ...utils import ON_WINDOWS, file_exists, find_free_port, get_hostname, get_ip, path_join
 from ..commands.console import echo_debug, echo_warning
 from ..constants import get_root
 from .agent import (
@@ -300,18 +300,14 @@ class DockerInterface(object):
         env_vars = {
             # Agent 6 will simply fail without an API key
             'DD_API_KEY': self.api_key,
-            # Run expvar on a random port
-            'DD_EXPVAR_PORT': 0,
+            # Set agent hostname for CI
+            'DD_HOSTNAME': get_hostname(),
+            'DD_EXPVAR_PORT': 5000,
             # Run API on a random port
             'DD_CMD_PORT': find_free_port(get_ip()),
             # Disable trace agent
             'DD_APM_ENABLED': 'false',
-            # Don't write .pyc, needed to fix this issue (only Python 2):
-            # When reinstalling a package, .pyc are not cleaned correctly. The issue is fixed by not writing them
-            # in the first place.
-            # More info: https://github.com/DataDog/integrations-core/pull/5454
-            # TODO: Remove PYTHONDONTWRITEBYTECODE env var when Python 2 support is removed
-            'PYTHONDONTWRITEBYTECODE': "1",
+            "DD_TELEMETRY_ENABLED": "1",
         }
         if self.dd_site:
             env_vars['DD_SITE'] = self.dd_site
@@ -320,7 +316,7 @@ class DockerInterface(object):
             env_vars['DD_DD_URL'] = self.dd_url
         if self.log_url:
             # Set custom agent log intake
-            env_vars['DD_LOGS_CONFIG_DD_URL'] = self.log_url
+            env_vars['DD_LOGS_CONFIG_LOGS_DD_URL'] = self.log_url
         env_vars.update(self.env_vars)
 
         volumes = [

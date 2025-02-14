@@ -2,7 +2,15 @@
 
 ## Overview
 
-This check monitors [Traffic Server][1] through the Datadog Agent.
+This check monitors [Traffic Server][1] through the Datadog Agent. 
+
+Enable the Datadog-Apache Traffic Server integration to:
+
+- Ensure the availability and performance of online resources, such as websites and applications.
+- Track metrics such as hits, volume, and changes in traffic to websites and applications.
+- Determine average response times and sizes for requests.
+- Monitor system and error logs. 
+
 
 ## Setup
 
@@ -92,7 +100,7 @@ Need help? Contact [Datadog support][9].
 
 
 [1]: https://trafficserver.apache.org/
-[2]: https://app.datadoghq.com/account/settings#agent
+[2]: https://app.datadoghq.com/account/settings/agent/latest
 [3]: https://docs.datadoghq.com/agent/kubernetes/integrations/
 [4]: https://github.com/DataDog/integrations-core/blob/master/traffic_server/datadog_checks/traffic_server/data/conf.yaml.example
 [5]: https://docs.datadoghq.com/agent/guide/agent-commands/#start-stop-and-restart-the-agent

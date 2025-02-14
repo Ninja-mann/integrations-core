@@ -4,10 +4,9 @@
 import socket
 import ssl
 from datetime import datetime
+from urllib.parse import urlparse
 
 import service_identity
-from six import text_type
-from six.moves.urllib.parse import urlparse
 
 from datadog_checks.base import AgentCheck, is_affirmative
 
@@ -61,6 +60,8 @@ class TLSCheck(AgentCheck):
         else:
             self._sock_type = socket.SOCK_STREAM
             self._port = int(self.instance.get('port', parsed_uri.port or 443))
+
+        self._start_tls = self.instance.get('start_tls')
 
         # https://en.wikipedia.org/wiki/Server_Name_Indication
         self._server_hostname = self.instance.get('server_hostname', self._server)
@@ -147,7 +148,7 @@ class TLSCheck(AgentCheck):
             validator, host_type = self.validation_data
 
             try:
-                validator(cert, text_type(self._server_hostname))
+                validator(cert, str(self._server_hostname))
             except service_identity.VerificationError:
                 message = 'The {} on the certificate does not match the given host'.format(host_type)
                 self.log.debug(message)

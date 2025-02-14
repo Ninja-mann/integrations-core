@@ -10,7 +10,7 @@ import pytest
 
 from datadog_checks.nginx import Nginx
 
-from .common import CHECK_NAME, FIXTURES_PATH, HOST, PORT, TAGS
+from .common import FIXTURES_PATH, HOST, PORT
 from .utils import mocked_perform_request
 
 pytestmark = [pytest.mark.unit]
@@ -76,15 +76,15 @@ def test_config(check, instance, test_case, extra_config, expected_http_kwargs):
 
         c.check(instance)
 
-        http_wargs = dict(
-            auth=mock.ANY,
-            cert=mock.ANY,
-            headers=mock.ANY,
-            proxies=mock.ANY,
-            timeout=mock.ANY,
-            verify=mock.ANY,
-            allow_redirects=mock.ANY,
-        )
+        http_wargs = {
+            'auth': mock.ANY,
+            'cert': mock.ANY,
+            'headers': mock.ANY,
+            'proxies': mock.ANY,
+            'timeout': mock.ANY,
+            'verify': mock.ANY,
+            'allow_redirects': mock.ANY,
+        }
         http_wargs.update(expected_http_kwargs)
 
         r.get.assert_called_with('http://localhost:8080/nginx_status', **http_wargs)
@@ -100,26 +100,6 @@ def test_no_version(check, instance, caplog):
 
     errors = [record for record in caplog.records if record.levelname == "ERROR"]
     assert not errors
-
-
-def test_emit_generic_and_non_generic_tags_by_default(instance):
-    instance = deepcopy(instance)
-    instance['disable_generic_tags'] = False
-    check = Nginx(CHECK_NAME, {}, [instance])
-    extra_tags = ['host:localhost']
-    tags = TAGS + extra_tags
-    normalised_tags = TAGS + ['nginx_host:localhost', 'host:localhost']
-    assert set(normalised_tags) == set(check._normalize_tags_type(tags))
-
-
-def test_emit_non_generic_tags_when_disabled(instance):
-    instance = deepcopy(instance)
-    instance['disable_generic_tags'] = True
-    check = Nginx(CHECK_NAME, {}, [instance])
-    extra_tags = ['host:localhost']
-    tags = TAGS + extra_tags
-    normalised_tags = TAGS + ['nginx_host:localhost']
-    assert set(normalised_tags) == set(check._normalize_tags_type(tags))
 
 
 @pytest.mark.parametrize(
@@ -192,7 +172,7 @@ def test_get_enabled_endpoints(check, instance_plus_v7, version, use_stream, exp
     instance['plus_api_version'] = version
     check = check(instance)
     check._perform_request = mock.MagicMock(side_effect=mocked_perform_request)
-    assert sorted(list(check._get_enabled_endpoints())) == sorted(expected_endpoints)
+    assert sorted(check._get_enabled_endpoints()) == sorted(expected_endpoints)
 
     # Assert this log line is not emmitted because if it does then the method fell back to all endpoints
     assert "Could not determine available endpoints from the API" not in caplog.text
@@ -246,7 +226,7 @@ def test_only_query_enabled_endpoints(check, dd_run_check, instance_plus_v7, onl
         check._perform_request = mock.MagicMock(side_effect=mock_get_return)
         endpoints = check._get_enabled_endpoints()
         expected_endpoints = [('nginx', []), ('http/requests', ['requests'])]
-        assert sorted(expected_endpoints) == sorted(list(endpoints))
+        assert sorted(expected_endpoints) == sorted(endpoints)
 
 
 @pytest.mark.parametrize(

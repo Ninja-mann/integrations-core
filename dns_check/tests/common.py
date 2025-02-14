@@ -2,6 +2,7 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 from datadog_checks.dev.docker import using_windows_containers
+from datadog_checks.dev.utils import get_metadata_metrics
 
 INSTANCE_INTEGRATION = {'name': 'datadog', 'hostname': 'www.datadoghq.com', 'nameserver': '8.8.8.8'}
 
@@ -50,29 +51,10 @@ CONFIG_INSTANCE_TIMEOUT = {
     'nameserver': '127.0.0.1',
 }
 
-CONFIG_INVALID = [
-    # invalid hostname
-    ({'name': 'invalid_hostname', 'hostname': 'example'}, "DNS resolution of example has failed"),
-    # invalid nameserver
-    (
-        {'name': 'invalid_nameserver', 'hostname': 'www.example.org', 'nameserver': '0.0.0.0'},
-        "DNS resolution of www.example.org timed out",
-    ),
-    # invalid record type
-    (
-        {'name': 'invalid_rcrd_type', 'hostname': 'www.example.org', 'record_type': 'FOO'},
-        "DNS resolution of www.example.org has failed",
-    ),
-    # valid domain when NXDOMAIN is expected
-    (
-        {'name': 'valid_domain_for_nxdomain_type', 'hostname': 'example.com', 'record_type': 'NXDOMAIN'},
-        "DNS resolution of example.com has failed",
-    ),
-]
-
 E2E_METADATA = {'docker_platform': 'windows' if using_windows_containers() else 'linux'}
 
 
 def _test_check(aggregator):
     aggregator.assert_metric('dns.response_time')
     aggregator.assert_all_metrics_covered()
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())

@@ -4,7 +4,9 @@
 
 import json
 import os
+import pathlib
 from collections import namedtuple
+from enum import Enum
 from functools import lru_cache
 
 import click
@@ -20,6 +22,11 @@ NOTIFICATION_TYPE = 'notificationtype'
 ALLOWED_EXTENSIONS_BY_FORMAT = {"json": [".json"], "yaml": [".yml", ".yaml"]}
 
 
+class MappingType(Enum):
+    INTEGER = 0
+    BITS = 1
+
+
 class MissingMIBException(Exception):
     pass
 
@@ -33,7 +40,7 @@ class MultipleTypeDefintionsException(Exception):
 
 
 # namedtuple definition for trap variable metadata
-VarMetadata = namedtuple('VarMetadata', ['oid', 'description', 'enum'])
+VarMetadata = namedtuple('VarMetadata', ['oid', 'description', 'enum', 'bits'])
 
 
 @click.command(
@@ -69,7 +76,12 @@ VarMetadata = namedtuple('VarMetadata', ['oid', 'description', 'enum'])
     '--no-descr', help='Removes descriptions from the generated file(s) when set (more compact).', is_flag=True
 )
 @click.option('--debug', '-d', help='Include debug output', is_flag=True)
-@click.argument('mib-files', nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, resolve_path=True))
+@click.argument(
+    'mib-files',
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+)
 def generate_traps_db(mib_sources, output_dir, output_file, output_format, no_descr, debug, mib_files):
     """Generate yaml or json formatted documents containing various information about traps. These files can be used by
     the Datadog Agent to enrich trap data.
@@ -121,16 +133,14 @@ def generate_traps_db(mib_sources, output_dir, output_file, output_format, no_de
         if not os.path.isdir(mibs_sources_dir):
             os.mkdir(mibs_sources_dir)
 
-        mib_sources = (
-            sorted(set([os.path.abspath(os.path.dirname(x)) for x in mib_files if os.path.sep in x])) + mib_sources
-        )
+        mib_sources = sorted({pathlib.Path(x).parent.as_uri() for x in mib_files if os.path.sep in x}) + mib_sources
 
         mib_files = [os.path.basename(x) for x in mib_files]
         searchers = [AnyFileSearcher(compiled_mibs_sources).setOptions(exts=['.json'])]
         code_generator = JsonCodeGen()
         file_writer = FileWriter(compiled_mibs_sources).setOptions(suffix='.json')
         mib_compiler = MibCompiler(SmiV1CompatParser(tempdir=''), code_generator, file_writer)
-        mib_compiler.addSources(*getReadersFromUrls(*mib_sources, **dict(fuzzyMatching=True)))
+        mib_compiler.addSources(*getReadersFromUrls(*mib_sources, **{'fuzzyMatching': True}))
         mib_compiler.addSearchers(*searchers)
 
         compiled_mibs, compiled_dependencies_mibs = compile_and_report_status(mib_files, mib_compiler)
@@ -198,7 +208,7 @@ def compile_and_report_status(mib_files, mib_compiler):
 
     # These MIBs were compiled but where not explicitly requested by the user. They will be moved
     # to a different folder.
-    dependencies_only_mibs = set([x for x in all_compiled_mibs if x not in child_compiled_mibs])
+    dependencies_only_mibs = {x for x in all_compiled_mibs if x not in child_compiled_mibs}
 
     return child_compiled_mibs, dependencies_only_mibs
 
@@ -243,8 +253,7 @@ def write_compact_trap_db(trap_db_per_mib, output_file, use_json=False):
                     )
                 )
                 conflict_oids.add(trap_oid)
-            compact_db["traps"][trap_oid] = {"mib": mib}
-            compact_db["traps"][trap_oid].update(trap)
+            compact_db["traps"][trap_oid] = trap
         for var_oid, var in trap_db["vars"].items():
             if var_oid in compact_db["vars"] and var["name"] != compact_db["vars"][var_oid]["name"]:
                 echo_warning(
@@ -282,6 +291,7 @@ def generate_trap_db(compiled_mibs, compiled_mibs_sources, no_descr):
         with open(compiled_mib_file, 'r') as f:
             file_content = json.load(f)
 
+        file_mib_name = file_content['meta']['module']
         trap_db = {"traps": {}, "vars": {}}
 
         traps = {k: v for k, v in file_content.items() if v.get('class') == NOTIFICATION_TYPE}
@@ -289,7 +299,7 @@ def generate_trap_db(compiled_mibs, compiled_mibs_sources, no_descr):
             trap_name = trap['name']
             trap_oid = trap['oid']
             trap_descr = trap.get('description', '')
-            trap_db["traps"][trap_oid] = {"name": trap_name}
+            trap_db["traps"][trap_oid] = {"name": trap_name, "mib": file_mib_name}
             if not no_descr:
                 trap_db["traps"][trap_oid]["descr"] = trap_descr
             for trap_var in trap.get('objects', []):
@@ -319,10 +329,11 @@ def generate_trap_db(compiled_mibs, compiled_mibs_sources, no_descr):
                     trap_db["vars"][var_metadata.oid]["descr"] = var_metadata.description
                 if var_metadata.enum:
                     trap_db["vars"][var_metadata.oid]["enum"] = var_metadata.enum
+                if var_metadata.bits:
+                    trap_db["vars"][var_metadata.oid]["bits"] = var_metadata.bits
 
         if trap_db['traps']:
-            mib_name = file_content['meta']['module']
-            trap_db_per_mib[mib_name] = trap_db
+            trap_db_per_mib[file_mib_name] = trap_db
 
     return trap_db_per_mib
 
@@ -351,12 +362,32 @@ def get_var_metadata(var_name, mib_name, search_locations=None):
 
     # grab enum if it exists in-line
     enum = file_content[var_name].get('syntax', {}).get('constraints', {}).get('enumeration', {})
+
     # if there is no enum in-line, check for type definition and enum in the same MIB and its imports
     if not enum:
         var_type = file_content[var_name].get('syntax', {}).get('type', '')
         if var_type:
             try:
-                enum = get_enum(var_type, mib_name, search_locations)
+                enum = get_mapping(var_type, mib_name, MappingType.INTEGER, search_locations)
+            except MissingMIBException:
+                echo_warning(
+                    "Variable {} references a type called {}, but the defining MIB is missing. "
+                    "Enum definitions for this variable will be unavailable.".format(var_name, var_type)
+                )
+            except MultipleTypeDefintionsException:
+                echo_warning(
+                    "Variable {} references a type called {}, but this symbol is imported from multiple MIBs. "
+                    "Enum definitions for this variable will be unavailable.".format(var_name, var_type)
+                )
+
+    # grab bits if they exist in-line
+    bits = file_content[var_name].get('syntax', {}).get('bits', {})
+
+    if not bits:
+        var_type = file_content[var_name].get('syntax', {}).get('type', '')
+        if var_type:
+            try:
+                bits = get_mapping(var_type, mib_name, MappingType.BITS, search_locations)
             except MissingMIBException:
                 echo_warning(
                     "Variable {} references a type called {}, but the defining MIB is missing. "
@@ -374,19 +405,25 @@ def get_var_metadata(var_name, mib_name, search_locations=None):
     for k, v in enum.items():
         parsed_enum[v] = k
 
-    return VarMetadata(file_content[var_name]['oid'], file_content[var_name].get('description', ''), parsed_enum)
+    parsed_bits = {}
+    for k, v in bits.items():
+        parsed_bits[v] = k
+
+    return VarMetadata(
+        file_content[var_name]['oid'], file_content[var_name].get('description', ''), parsed_enum, parsed_bits
+    )
 
 
 @lru_cache(maxsize=None)
-def get_enum(var_name, mib_name, search_locations=None):
+def get_mapping(var_name, mib_name, mapping_type: MappingType, search_locations=None):
     """
     Returns the enum of a given variable, even if the enum is not defined in-line or the same MIB.
     :param var_name: Name of the variable to search for
     :param search_locations: Tuple of path to directories containing json-compiled MIB files
     :return: The oid and the description of the variable.
     """
-    enum = {}
-    while mib_name and var_name and not enum:
+    mapping = {}
+    while mib_name and var_name and not mapping:
         for location in search_locations:
             file_name = os.path.join(location, mib_name + '.json')
             if os.path.isfile(file_name):
@@ -408,11 +445,17 @@ def get_enum(var_name, mib_name, search_locations=None):
                 raise MissingMIBException()
             continue
 
-        enum = file_content[var_name].get('type', {}).get('constraints', {}).get('enumeration', {})
+        if mapping_type == MappingType.INTEGER:
+            mapping = file_content[var_name].get('type', {}).get('constraints', {}).get('enumeration', {})
+        elif mapping_type == MappingType.BITS:
+            mapping = file_content[var_name].get('type', {}).get('bits', {})
+        else:
+            raise ValueError("invalid mapping type, must be INTEGER or BITS")
+
         # update variable to the type name in case we have to go another layer down
         var_name = file_content[var_name].get('type', {}).get('type', '')
 
-    return enum
+    return mapping
 
 
 @lru_cache(maxsize=None)

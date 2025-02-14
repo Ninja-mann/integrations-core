@@ -1,20 +1,16 @@
-# Agent Check: Kafka
+# Agent Check: Kafka Broker
 
 ![Kafka Dashboard][1]
 
 ## Overview
 
-Connect Kafka to Datadog to:
+View Kafka broker metrics collected for a 360-view of the health and performance of your Kafka clusters in real time. With this integration, you can collect metrics and logs from your Kafka deployment to visualize telemetry and alert on the performance of your Kafka stack. 
 
-- Visualize the performance of your cluster in real time.
-- Correlate the performance of Kafka with the rest of your applications.
-
-This check has a limit of 350 metrics per instance. The number of returned metrics is indicated on the info page. Specify the metrics you are interested in by editing the configuration below. To learn how to customize the metrics to collect see the [JMX Checks documentation][2] for more detailed instructions.
-
-To collect Kafka consumer metrics, see the [kafka_consumer check][3].
-
-**Note**: This integration attached sample configuration works only for Kafka >= 0.8.2.
+**Note**: 
+- This check has a limit of 350 metrics per instance. The number of returned metrics is indicated in the Agent status output. Specify the metrics you are interested in by editing the configuration below. For more detailed instructions on customizing the metrics to collect, see the [JMX Checks documentation][2].
+- This integration attached sample configuration works only for Kafka >= 0.8.2.
 If you are running a version older than that, see the [Agent v5.2.x released sample files][22].
+- To collect Kafka consumer metrics, see the [kafka_consumer check][3].
 
 ## Setup
 
@@ -153,11 +149,12 @@ See [service_checks.json][15] for a list of service checks provided by this inte
 - [Monitoring Kafka performance metrics][19]
 - [Collecting Kafka performance metrics][20]
 - [Monitoring Kafka with Datadog][21]
+- [Kafka Overview on the Knowledge Center][23]
 
 [1]: https://raw.githubusercontent.com/DataDog/integrations-core/master/kafka/images/kafka_dashboard.png
 [2]: https://docs.datadoghq.com/integrations/java/
 [3]: https://docs.datadoghq.com/integrations/kafka/?tab=host#kafka-consumer-integration
-[4]: https://app.datadoghq.com/account/settings#agent
+[4]: https://app.datadoghq.com/account/settings/agent/latest
 [5]: https://github.com/DataDog/jmxfetch
 [6]: https://docs.datadoghq.com/integrations/amazon_msk/#pagetitle
 [7]: https://docs.datadoghq.com/agent/guide/agent-configuration-files/#agent-configuration-directory
@@ -175,3 +172,5 @@ See [service_checks.json][15] for a list of service checks provided by this inte
 [20]: https://www.datadoghq.com/blog/collecting-kafka-performance-metrics
 [21]: https://www.datadoghq.com/blog/monitor-kafka-with-datadog
 [22]: https://raw.githubusercontent.com/DataDog/dd-agent/5.2.1/conf.d/kafka.yaml.example
+[23]: https://www.datadoghq.com/knowledge-center/apache-kafka/
+[25]: https://app.datadoghq.com/data-streams

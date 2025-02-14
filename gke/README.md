@@ -39,9 +39,7 @@ Choose a mode of operation. A *mode of operation* refers to the level of flexibi
 
 #### Standard
 
-Deploy a [containerized version of the Datadog Agent][7] on your Kubernetes cluster. 
-
-You can deploy the Agent with a [Helm chart][8] or directly with a [DaemonSet][9].
+Deploy a [containerized version of the Datadog Agent][7] on your Kubernetes cluster. See [Install the Datadog Agent on Kubernetes][8].
 
 
 <!-- xxz tab xxx -->
@@ -49,42 +47,17 @@ You can deploy the Agent with a [Helm chart][8] or directly with a [DaemonSet][9
 
 #### Autopilot
 
-1. Install Helm.
+Follow the instructions in the GKE [Autopilot section][14] of the Kubernetes distributions page.
 
-2. Add the Datadog repository to your Helm repositories:
+#### Admission Controller
+ 
+To use [Admission Controller][102] with Autopilot, set the [`configMode`][103] of the Admission Controller to either `service` or `hostip`. 
 
-  ```bash
-  helm repo add datadog https://helm.datadoghq.com
-  helm repo update
-  ```
+Because Autopilot does not allow `socket` mode, Datadog recommends using `service` (with `hostip` as a fallback) to provide a more robust layer of abstraction for the controller. 
 
-3. Deploy the Datadog Agent and Cluster Agent on Autopilot with the following command:
-
-  ```bash
-  helm install <RELEASE_NAME> \
-      --set datadog.apiKey=<DATADOG_API_KEY> \
-      --set datadog.appKey=<DATADOG_APP_KEY> \
-      --set clusterAgent.enabled=true \
-      --set clusterAgent.metricsProvider.enabled=true \
-      --set providers.gke.autopilot=true \
-      datadog/datadog
-  ```
-
-  **Note**: If you also wish to enable logs or traces, add lines to this command setting `datadog.logs.enabled` (for logs) and `datadog.apm.enabled` (for traces) to `true`. For example:
-
-  ```bash
-  helm install --name <RELEASE_NAME> \
-      --set datadog.apiKey=<DATADOG_API_KEY> \
-      --set datadog.appKey=<DATADOG_APP_KEY> \
-      --set clusterAgent.enabled=true \
-      --set clusterAgent.metricsProvider.enabled=true \
-      --set providers.gke.autopilot=true \
-      --set datadog.logs.enabled=true \
-      --set datadog.apm.enabled=true \
-      datadog/datadog
-  ```
-
-  See the [Datadog helm-charts repository][10] for a full list of configurable values.
+[101]: https://github.com/DataDog/helm-charts/tree/master/charts/datadog#values
+[102]: https://docs.datadoghq.com/containers/cluster_agent/admission_controller/?tab=operator
+[103]: https://github.com/DataDog/helm-charts/blob/main/charts/datadog/values.yaml#L1046
 
 
 <!-- xxz tab xxx -->
@@ -92,7 +65,10 @@ You can deploy the Agent with a [Helm chart][8] or directly with a [DaemonSet][9
 
 ## Further Reading
 
-- [Announcing support for GKE Autopilot][11]
+- [Monitor GKE Autopilot with Datadog][10]
+- [Monitor GKE with Datadog][11]
+- [Monitor your T2A-powered GKE workloads with Datadog][12]
+- [New GKE dashboards and metrics provide deeper visibility into your environment][13]
 
 [1]: https://cloud.google.com/resource-manager/docs/creating-managing-projects
 [2]: https://console.cloud.google.com/apis/api/container.googleapis.com
@@ -100,8 +76,11 @@ You can deploy the Agent with a [Helm chart][8] or directly with a [DaemonSet][9
 [4]: https://cloud.google.com/sdk/docs/initializing
 [5]: /integrations/google_cloud_platform/
 [6]: https://app.datadoghq.com/screen/integration/gce
-[7]: https://app.datadoghq.com/account/settings#agent/kubernetes
-[8]: https://docs.datadoghq.com/agent/kubernetes/?tab=helm
-[9]: https://docs.datadoghq.com/agent/kubernetes/?tab=daemonset
-[10]: https://github.com/DataDog/helm-charts/tree/master/charts/datadog#values
-[11]: https://www.datadoghq.com/blog/gke-autopilot-monitoring/
+[7]: https://app.datadoghq.com/account/settings/agent/latest?platform=kubernetes
+[8]: https://docs.datadoghq.com/containers/kubernetes/installation?tab=operator
+[9]: https://github.com/DataDog/helm-charts/tree/master/charts/datadog#values
+[10]: https://www.datadoghq.com/blog/gke-autopilot-monitoring/
+[11]: https://www.datadoghq.com/blog/monitor-google-kubernetes-engine/
+[12]: https://www.datadoghq.com/blog/monitor-tau-t2a-gke-workloads-with-datadog-arm-support/
+[13]: https://www.datadoghq.com/blog/gke-dashboards-integration-improvements/
+[14]: https://docs.datadoghq.com/containers/kubernetes/distributions/?tab=helm#autopilot

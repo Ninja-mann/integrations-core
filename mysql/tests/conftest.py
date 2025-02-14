@@ -8,12 +8,13 @@ import os
 import mock
 import pymysql
 import pytest
+from packaging.version import parse as parse_version
 
 from datadog_checks.dev import TempDir, WaitFor, docker_run
 from datadog_checks.dev.conditions import CheckDockerLogs
 
 from . import common, tags
-from .common import MYSQL_REPLICATION
+from .common import MYSQL_REPLICATION, MYSQL_VERSION_PARSED
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ def dd_environment(config_e2e):
     logs_path = _mysql_logs_path()
 
     with TempDir('logs') as logs_host_path:
+        # for Ubuntu
+        os.chmod(logs_host_path, 0o770)
+
         e2e_metadata = {'docker_volumes': ['{}:{}'.format(logs_host_path, logs_path)]}
 
         with docker_run(
@@ -98,6 +102,8 @@ def instance_complex():
             'schema_size_metrics': True,
             'table_size_metrics': True,
             'system_table_size_metrics': True,
+            'table_row_stats_metrics': True,
+            'index_metrics': True,
         },
         'tags': tags.METRIC_TAGS,
         'queries': [
@@ -271,6 +277,7 @@ def version_metadata():
         'version.raw': mock.ANY,
         'version.build': mock.ANY,
         'flavor': flavor,
+        'resolved_hostname': 'forced_hostname',
     }
 
 
@@ -361,6 +368,7 @@ def _create_enable_consumers_procedure(conn):
             SQL SECURITY DEFINER
         BEGIN
             UPDATE performance_schema.setup_consumers SET enabled='YES' WHERE name LIKE 'events_statements_%';
+            UPDATE performance_schema.setup_consumers SET enabled='YES' WHERE name = 'events_waits_current';
         END;
     """
     )
@@ -399,14 +407,17 @@ def _add_dog_user(conn):
     cur.execute("GRANT PROCESS ON *.* TO 'dog'@'%'")
     cur.execute("GRANT REPLICATION CLIENT ON *.* TO 'dog'@'%'")
     cur.execute("GRANT SELECT ON performance_schema.* TO 'dog'@'%'")
-    if MYSQL_FLAVOR == 'mysql' and MYSQL_VERSION == '8.0':
-        cur.execute("ALTER USER 'dog'@'%' WITH MAX_USER_CONNECTIONS 0")
-    elif MYSQL_FLAVOR == 'mariadb' and MYSQL_VERSION == '10.5':
-        cur.execute("GRANT SLAVE MONITOR ON *.* TO 'dog'@'%'")
-        cur.execute("ALTER USER 'dog'@'%' WITH MAX_USER_CONNECTIONS 0")
-    else:
+    cur.execute("GRANT SELECT ON mysql.innodb_index_stats TO 'dog'@'%'")
+
+    # refactor try older mysql.user table first. if this fails, go to newer ALTER USER
+    try:
         cur.execute("UPDATE mysql.user SET max_user_connections = 0 WHERE user='dog' AND host='%'")
         cur.execute("FLUSH PRIVILEGES")
+    # need to get better exception in order to raise errors in the future
+    except Exception:
+        if MYSQL_FLAVOR == 'mariadb':
+            cur.execute("GRANT SLAVE MONITOR ON *.* TO 'dog'@'%'")
+        cur.execute("ALTER USER 'dog'@'%' WITH MAX_USER_CONNECTIONS 0")
 
 
 def _add_bob_user(conn):
@@ -452,8 +463,90 @@ def populate_database():
     cur.execute("GRANT SELECT ON testdb.users TO 'dog'@'%';")
     cur.execute("GRANT SELECT, UPDATE ON testdb.users TO 'bob'@'%';")
     cur.execute("GRANT SELECT, UPDATE ON testdb.users TO 'fred'@'%';")
+    add_schema_test_databases(cur)
     cur.close()
     _create_explain_procedure(conn, "testdb")
+
+
+def add_schema_test_databases(cursor):
+    cursor.execute("USE mysql;")
+    cursor.execute("CREATE DATABASE datadog_test_schemas;")
+    cursor.execute("USE datadog_test_schemas;")
+    cursor.execute("GRANT SELECT ON datadog_test_schemas.* TO 'dog'@'%';")
+    cursor.execute(
+        """CREATE TABLE cities (
+           id INT NOT NULL DEFAULT 0,
+           name VARCHAR(255),
+           population INT NOT NULL DEFAULT 0,
+           CONSTRAINT PK_Cities PRIMARY KEY (id))
+        """
+    )
+    cursor.execute(
+        """CREATE TABLE cities_partitioned (
+           id INT NOT NULL DEFAULT 0,
+           name VARCHAR(255),
+           population INT NOT NULL DEFAULT 0,
+           CONSTRAINT PK_Cities PRIMARY KEY (id))
+
+           PARTITION BY RANGE (id) (
+           PARTITION p0 VALUES LESS THAN (100),
+           PARTITION p1 VALUES LESS THAN (200),
+           PARTITION p2 VALUES LESS THAN (300),
+           PARTITION p3 VALUES LESS THAN MAXVALUE);
+        """
+    )
+
+    # create one column index
+    cursor.execute("CREATE INDEX single_column_index ON cities (population);")
+    # create two column index, one with subpart and descending
+    cursor.execute("CREATE INDEX two_columns_index ON cities (id, name(3) DESC);")
+    # create functional key part index - available after MySQL 8.0.13
+    if MYSQL_VERSION_PARSED >= parse_version('8.0.13') and MYSQL_FLAVOR == 'mysql':
+        cursor.execute("CREATE INDEX functional_key_part_index ON cities ((population + 1) DESC);")
+
+    cursor.execute(
+        """CREATE TABLE landmarks (
+           name VARCHAR(255),
+           city_id INT DEFAULT 0,
+           CONSTRAINT FK_CityId FOREIGN KEY (city_id) REFERENCES cities(id));
+        """
+    )
+
+    cursor.execute(
+        """ CREATE TABLE Restaurants (
+            RestaurantName VARCHAR(255),
+            District VARCHAR(100),
+            Cuisine VARCHAR(100),
+            CONSTRAINT UC_RestaurantNameDistrict UNIQUE (RestaurantName, District));
+        """
+    )
+
+    cursor.execute(
+        """CREATE TABLE RestaurantReviews (
+            RestaurantName VARCHAR(255),
+            District VARCHAR(255),
+            Review TEXT,
+            CONSTRAINT FK_RestaurantNameDistrict FOREIGN KEY (RestaurantName, District)
+            REFERENCES Restaurants(RestaurantName, District));
+        """
+    )
+    # Second DB
+    cursor.execute("CREATE DATABASE datadog_test_schemas_second;")
+    cursor.execute("USE datadog_test_schemas_second;")
+    cursor.execute("GRANT SELECT ON datadog_test_schemas_second.* TO 'dog'@'%';")
+    cursor.execute("CREATE TABLE IF NOT EXISTS ϑings (id INT DEFAULT 0, name VARCHAR(255));")
+    cursor.execute("CREATE UNIQUE INDEX thingsindex ON ϑings (name);")
+
+    cursor.execute(
+        """CREATE TABLE ts (id INT, purchased DATE)
+           PARTITION BY RANGE( YEAR(purchased) )
+           SUBPARTITION BY HASH( TO_DAYS(purchased) )
+           SUBPARTITIONS 2 (
+               PARTITION p0 VALUES LESS THAN (1990),
+               PARTITION p1 VALUES LESS THAN (2000),
+               PARTITION p2 VALUES LESS THAN MAXVALUE);
+        """
+    )
 
 
 def _wait_for_it_script():
@@ -505,7 +598,7 @@ def _mysql_docker_repo():
         # https://github.com/DataDog/integrations-core/pull/4669)
         if MYSQL_VERSION in ('5.6', '5.7'):
             return 'bergerx/mysql-replication'
-        elif MYSQL_VERSION == '8.0' or MYSQL_VERSION == 'latest':
+        elif MYSQL_VERSION.startswith('8') or MYSQL_VERSION == 'latest':
             return 'bitnami/mysql'
     elif MYSQL_FLAVOR == 'mariadb':
         return 'bitnami/mariadb'

@@ -31,7 +31,7 @@ class MyException(Exception):
     pass
 
 
-class TestJob:
+class Job:
     def __init__(self, check):
         self.check = check
 
@@ -72,7 +72,7 @@ class TestJob:
 def test_tracked_method(aggregator, debug_stats_kwargs, disable_tracking):
     os.environ['DD_DISABLE_TRACKED_METHOD'] = str(disable_tracking).lower()
     check = HelloCheck(debug_stats_kwargs) if debug_stats_kwargs else AgentCheck(name="hello")
-    job = TestJob(check)
+    job = Job(check)
     result = job.run_job()
     assert result == EXPECTED_RESULT
 
@@ -93,5 +93,6 @@ def test_tracked_method(aggregator, debug_stats_kwargs, disable_tracking):
         aggregator.assert_metric(
             "dd.hello.operation.error",
             hostname=hostname,
-            tags=tags + ["operation:test_tracked_exception", "error:<class 'test_tracking.MyException'>"],
+            tags=tags
+            + ["operation:test_tracked_exception", "error:<class 'tests.base.utils.test_tracking.MyException'>"],
         )

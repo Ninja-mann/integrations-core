@@ -13,10 +13,10 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from pyVim import connect
-from pyVmomi import vim  # pylint: disable=E0611
-from pyVmomi import vmodl  # pylint: disable=E0611
-from six import itervalues
-from six.moves import range
+from pyVmomi import (
+    vim,  # pylint: disable=E0611
+    vmodl,  # pylint: disable=E0611
+)
 
 from datadog_checks.base import AgentCheck, ensure_unicode, to_string
 from datadog_checks.base.checks.libs.thread_pool import SENTINEL, Pool
@@ -212,7 +212,7 @@ class VSphereLegacyCheck(AgentCheck):
             new_events = event_manager.QueryEvents(query_filter)
             self.log.debug("Got %s events from vCenter event manager", len(new_events))
             for event in new_events:
-                normalized_event = VSphereEvent(event, self.event_config[i_key], tags)
+                normalized_event = VSphereEvent(event, self.event_config[i_key], tags, list(REALTIME_RESOURCES))
                 # Can return None if the event if filtered out
                 event_payload = normalized_event.get_datadog_payload()
                 if event_payload is not None:
@@ -949,7 +949,7 @@ class VSphereLegacyCheck(AgentCheck):
         batch_size = self.batch_morlist_size or n_mors
         for batch in mors_batch_method(i_key, batch_size, max_historical_metrics):
             query_specs = []
-            for mor in itervalues(batch):
+            for mor in batch.values():
                 if mor['mor_type'] == 'vm':
                     vm_count += 1
                 if mor['mor_type'] not in REALTIME_RESOURCES and ('metrics' not in mor or not mor['metrics']):

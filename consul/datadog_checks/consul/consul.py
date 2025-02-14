@@ -8,11 +8,10 @@ from datetime import datetime, timedelta
 from itertools import islice
 from multiprocessing.pool import ThreadPool
 from time import time as timestamp
+from urllib.parse import urljoin
 
 import requests
 from requests import HTTPError
-from six import iteritems, iterkeys, itervalues
-from six.moves.urllib.parse import urljoin
 
 from datadog_checks.base import ConfigurationError, OpenMetricsBaseCheck, is_affirmative
 from datadog_checks.base.utils.serialization import json
@@ -42,6 +41,8 @@ NodeStatus = namedtuple('NodeStatus', ['node_id', 'service_name', 'service_tags_
 
 
 class ConsulCheck(OpenMetricsBaseCheck):
+    DEFAULT_METRIC_LIMIT = 0
+
     def __init__(self, name, init_config, instances):
         instance = instances[0]
         self.url = instance.get('url')
@@ -83,7 +84,6 @@ class ConsulCheck(OpenMetricsBaseCheck):
         self.scraper_config = self.get_scraper_config(instance)
 
         self.base_tags = self.instance.get('tags', [])
-
         self.single_node_install = is_affirmative(self.instance.get('single_node_install', False))
         self.perform_new_leader_checks = is_affirmative(
             self.instance.get('new_leader_checks', self.init_config.get('new_leader_checks', False))
@@ -97,6 +97,7 @@ class ConsulCheck(OpenMetricsBaseCheck):
         self.perform_network_latency_checks = is_affirmative(
             self.instance.get('network_latency_checks', self.init_config.get('network_latency_checks'))
         )
+        self.use_node_name_as_hostname = is_affirmative(self.instance.get('use_node_name_as_hostname', True))
         self.disable_legacy_service_tag = is_affirmative(self.instance.get('disable_legacy_service_tag', False))
         default_services_include = self.init_config.get(
             'service_whitelist', self.init_config.get('services_include', [])
@@ -307,7 +308,7 @@ class ConsulCheck(OpenMetricsBaseCheck):
                 )
                 self.warning(log_line)
 
-                services = {s: services[s] for s in list(islice(iterkeys(allowed_services), 0, self.max_services))}
+                services = {s: services[s] for s in list(islice(allowed_services, 0, self.max_services))}
 
         return services
 
@@ -372,12 +373,14 @@ class ConsulCheck(OpenMetricsBaseCheck):
                             tags.append('service:{}'.format(check['ServiceName']))
                     if check["ServiceID"]:
                         tags.append("consul_service_id:{}".format(check["ServiceID"]))
+                    if check["Node"]:
+                        tags.append("consul_node:{}".format(check["Node"]))
                     sc[sc_id] = {'status': status, 'tags': tags}
 
                 elif STATUS_SEVERITY[status] > STATUS_SEVERITY[sc[sc_id]['status']]:
                     sc[sc_id]['status'] = status
 
-            for s in itervalues(sc):
+            for s in sc.values():
                 self.service_check(HEALTH_CHECK, s['status'], tags=main_tags + s['tags'])
 
         except Exception as e:
@@ -433,7 +436,7 @@ class ConsulCheck(OpenMetricsBaseCheck):
                     nodes_with_service[service] if self.thread_pool is None else nodes_with_service[service].get(),
                 )
 
-            for node, service_status in iteritems(nodes_to_service_status):
+            for node, service_status in nodes_to_service_status.items():
                 # For every node discovered for included services, gauge the following:
                 # `consul.catalog.services_up` : Total services registered on node
                 # `consul.catalog.services_passing` : Total passing services on node
@@ -451,7 +454,7 @@ class ConsulCheck(OpenMetricsBaseCheck):
                         tags=main_tags + node_tags,
                     )
 
-            for node_status, count in iteritems(nodes_per_service_tag_counts):
+            for node_status, count in nodes_per_service_tag_counts.items():
                 service_tags = [
                     'consul_{}_service_tag:{}'.format(node_status.service_name, tag)
                     for tag in node_status.service_tags_set
@@ -581,9 +584,9 @@ class ConsulCheck(OpenMetricsBaseCheck):
                         median = latencies[half_n]
                     else:
                         median = (latencies[half_n - 1] + latencies[half_n]) / 2
-                    self.gauge('consul.net.dc.latency.min', latencies[0], hostname='', tags=tags)
-                    self.gauge('consul.net.dc.latency.median', median, hostname='', tags=tags)
-                    self.gauge('consul.net.dc.latency.max', latencies[-1], hostname='', tags=tags)
+                    self.gauge('consul.net.dc.latency.min', latencies[0], tags=tags)
+                    self.gauge('consul.net.dc.latency.median', median, tags=tags)
+                    self.gauge('consul.net.dc.latency.max', latencies[-1], tags=tags)
 
                 # We've found ourselves, we can move on
                 break
@@ -596,7 +599,13 @@ class ConsulCheck(OpenMetricsBaseCheck):
         else:
             known_distances = {}
             for i, node in enumerate(nodes):
-                node_name = node['Node']
+                tags = main_tags + ['consul_node_name:{}'.format(node['Node'])]
+
+                # Use the node name as the hostname if configured
+                if self.use_node_name_as_hostname:
+                    node_name = node['Node']
+                else:
+                    node_name = ''
 
                 # Initialize with pre-computed distances
                 latencies = [known_distances[(x, x + 1)] for x in range(i)]
@@ -614,24 +623,14 @@ class ConsulCheck(OpenMetricsBaseCheck):
                     median = latencies[half_n]
                 else:
                     median = (latencies[half_n - 1] + latencies[half_n]) / 2
-                self.gauge('consul.net.node.latency.min', latencies[0], hostname=node_name, tags=main_tags)
-                self.gauge(
-                    'consul.net.node.latency.p25', latencies[ceili(n * 0.25) - 1], hostname=node_name, tags=main_tags
-                )
-                self.gauge('consul.net.node.latency.median', median, hostname=node_name, tags=main_tags)
-                self.gauge(
-                    'consul.net.node.latency.p75', latencies[ceili(n * 0.75) - 1], hostname=node_name, tags=main_tags
-                )
-                self.gauge(
-                    'consul.net.node.latency.p90', latencies[ceili(n * 0.90) - 1], hostname=node_name, tags=main_tags
-                )
-                self.gauge(
-                    'consul.net.node.latency.p95', latencies[ceili(n * 0.95) - 1], hostname=node_name, tags=main_tags
-                )
-                self.gauge(
-                    'consul.net.node.latency.p99', latencies[ceili(n * 0.99) - 1], hostname=node_name, tags=main_tags
-                )
-                self.gauge('consul.net.node.latency.max', latencies[-1], hostname=node_name, tags=main_tags)
+                self.gauge('consul.net.node.latency.min', latencies[0], hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.p25', latencies[ceili(n * 0.25) - 1], hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.median', median, hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.p75', latencies[ceili(n * 0.75) - 1], hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.p90', latencies[ceili(n * 0.90) - 1], hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.p95', latencies[ceili(n * 0.95) - 1], hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.p99', latencies[ceili(n * 0.99) - 1], hostname=node_name, tags=tags)
+                self.gauge('consul.net.node.latency.max', latencies[-1], hostname=node_name, tags=tags)
 
     def _get_all_nodes(self):
         return self.consul_request('v1/catalog/nodes')

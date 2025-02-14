@@ -31,6 +31,11 @@ def instance_basic():
 
 
 @pytest.fixture
+def instance_basic_dict():
+    return deepcopy(common.INSTANCE_BASIC_DICT)
+
+
+@pytest.fixture
 def instance_basic_disable_service_tag():
     return deepcopy(common.INSTANCE_BASIC_DISABLE_SERVICE_TAG)
 
@@ -41,5 +46,25 @@ def instance_wildcard():
 
 
 @pytest.fixture
+def instance_wildcard_dict():
+    return deepcopy(common.INSTANCE_WILDCARD_DICT)
+
+
+@pytest.fixture
 def instance_all():
     return deepcopy(common.INSTANCE_ALL)
+
+
+@pytest.fixture
+def instance_startup_type_filter():
+    return deepcopy(common.INSTANCE_STARTUP_TYPE_FILTER)
+
+
+@pytest.fixture
+def instance_trigger_start():
+    return deepcopy(common.INSTANCE_TRIGGER_START)
+
+
+@pytest.fixture
+def instance_name_regex_prefix():
+    return deepcopy(common.INSTANCE_PREFIX_MATCH)

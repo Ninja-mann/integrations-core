@@ -4,8 +4,6 @@
 from contextlib import closing
 
 import snowflake.connector as sf
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
 
 from datadog_checks.base import AgentCheck, ConfigurationError, ensure_bytes, to_native_string
 from datadog_checks.base.utils.db import QueryManager
@@ -13,7 +11,7 @@ from datadog_checks.base.utils.db import QueryManager
 from . import queries
 from .config import Config
 
-METRIC_GROUPS = {
+ACCOUNT_USAGE_METRIC_GROUPS = {
     'snowflake.query': [queries.WarehouseLoad, queries.QueryHistory],
     'snowflake.billing': [queries.CreditUsage, queries.WarehouseCreditUsage],
     'snowflake.storage': [queries.StorageUsageMetrics],
@@ -24,6 +22,17 @@ METRIC_GROUPS = {
     'snowflake.auto_recluster': [queries.AutoReclusterHistory],
     'snowflake.pipe': [queries.PipeHistory],
     'snowflake.replication': [queries.ReplicationUsage],
+}
+
+ORGANIZATION_USAGE_METRIC_GROUPS = {
+    'snowflake.organization.contracts': [queries.OrgContractItems],
+    'snowflake.organization.credit': [queries.OrgCreditUsage],
+    'snowflake.organization.currency': [queries.OrgCurrencyUsage],
+    'snowflake.organization.warehouse': [queries.OrgWarehouseCreditUsage],
+    'snowflake.organization.storage': [queries.OrgStorageDaily],
+    'snowflake.organization.balance': [queries.OrgBalance],
+    'snowflake.organization.rate': [queries.OrgRateSheet],
+    'snowflake.organization.data_transfer': [queries.OrgDataTransfer],
 }
 
 
@@ -60,24 +69,46 @@ class SnowflakeCheck(AgentCheck):
                 'Snowflake `role` is set as `ACCOUNTADMIN` which should be used cautiously, '
                 'refer to docs about custom roles.'
             )
-
+        metric_groups = (
+            ORGANIZATION_USAGE_METRIC_GROUPS
+            if (self._config.schema == 'ORGANIZATION_USAGE')
+            else ACCOUNT_USAGE_METRIC_GROUPS
+        )
         self.metric_queries = []
         self.errors = []
+
+        # Collect queries corresponding to groups provided in the config
         for mgroup in self._config.metric_groups:
             try:
-                if not self._config.aggregate_last_24_hours:
-                    for query in range(len(METRIC_GROUPS[mgroup])):
-                        METRIC_GROUPS[mgroup][query]['query'] = METRIC_GROUPS[mgroup][query]['query'].replace(
-                            'DATEADD(hour, -24, current_timestamp())', 'date_trunc(day, current_date)'
-                        )
-                self.metric_queries.extend(METRIC_GROUPS[mgroup])
+                self.metric_queries.extend(metric_groups[mgroup])
             except KeyError:
                 self.errors.append(mgroup)
+                continue
+
+        if not self._config.aggregate_last_24_hours:
+            # Modify queries to use legacy time aggregation behavior
+            self.metric_queries = [
+                {
+                    **query,
+                    'query': query['query'].replace(
+                        'DATEADD(hour, -24, current_timestamp())', 'date_trunc(day, current_date)'
+                    ),
+                }
+                for query in self.metric_queries
+            ]
 
         if self.errors:
-            self.log.warning('Invalid metric_groups found in snowflake conf.yaml: %s', (', '.join(self.errors)))
+            self.log.warning(
+                'Invalid metric_groups for `%s` found in snowflake conf.yaml: %s',
+                self._config.schema,
+                (', '.join(self.errors)),
+            )
         if not self.metric_queries and not self._config.custom_queries_defined:
-            raise ConfigurationError('No valid metric_groups or custom query configured, please list at least one.')
+            raise ConfigurationError(
+                'No valid metric_groups for `{}` or custom query configured, please list at least one.'.format(
+                    self._config.schema
+                )
+            )
 
         self._query_manager = QueryManager(self, self.execute_query_raw, queries=self.metric_queries, tags=self._tags)
         self.check_initializations.append(self._query_manager.compile_queries)
@@ -85,29 +116,10 @@ class SnowflakeCheck(AgentCheck):
     def read_token(self):
         if self._config.token_path:
             self.log.debug("Renewing Snowflake client token")
-            with open(self._config.token_path, 'rb') as f:
+            with open(self._config.token_path, 'r', encoding="UTF-8") as f:
                 self._config.token = f.read()
 
         return self._config.token
-
-    def read_key(self):
-        if self._config.private_key_path:
-            self.log.debug("Reading Snowflake client key for key pair authentication")
-            # https://docs.snowflake.com/en/user-guide/python-connector-example.html#using-key-pair-authentication-key-pair-rotation
-            with open(self._config.private_key_path, "rb") as key:
-                p_key = serialization.load_pem_private_key(
-                    key.read(), password=ensure_bytes(self._config.private_key_password), backend=default_backend()
-                )
-
-                pkb = p_key.private_bytes(
-                    encoding=serialization.Encoding.DER,
-                    format=serialization.PrivateFormat.PKCS8,
-                    encryption_algorithm=serialization.NoEncryption(),
-                )
-
-                return pkb
-
-        return None
 
     def check(self, _):
         if self.instance.get('user'):
@@ -133,8 +145,9 @@ class SnowflakeCheck(AgentCheck):
 
             if cursor.rowcount is None or cursor.rowcount < 1:
                 self.log.debug("Failed to fetch records from query: `%s`", query)
-                return []
-            return cursor.fetchall()
+                return
+            # Iterating on the cursor provides one row at a time without loading all of them at once
+            yield from cursor
 
     def connect(self):
         self.log.debug(
@@ -169,7 +182,8 @@ class SnowflakeCheck(AgentCheck):
                 ocsp_response_cache_filename=self._config.ocsp_response_cache_filename,
                 authenticator=self._config.authenticator,
                 token=self.read_token(),
-                private_key=self.read_key(),
+                private_key_file=self._config.private_key_path,
+                private_key_file_pwd=ensure_bytes(self._config.private_key_password),
                 client_session_keep_alive=self._config.client_keep_alive,
                 proxy_host=self.proxy_host,
                 proxy_port=self.proxy_port,
@@ -187,8 +201,8 @@ class SnowflakeCheck(AgentCheck):
     @AgentCheck.metadata_entrypoint
     def _collect_version(self):
         try:
-            raw_version = self.execute_query_raw("select current_version();")
-            version = raw_version[0][0]
+            raw_version = next(self.execute_query_raw("select current_version();"))
+            version = raw_version[0]
         except Exception as e:
             self.log.error("Error collecting version for Snowflake: %s", e)
         else:

@@ -25,6 +25,8 @@ STATUS_VARS = [
     # Table Cache Metrics
     'mysql.performance.open_files',
     'mysql.performance.open_tables',
+    # Performance schema metrics
+    'mysql.performance.performance_schema_digest_lost',
     # Network Metrics
     'mysql.performance.bytes_sent',
     'mysql.performance.bytes_received',
@@ -59,6 +61,11 @@ TABLE_VARS = [
     'mysql.info.table.data_size',
 ]
 
+ROW_TABLE_STATS_VARS = [
+    'mysql.info.table.rows.read',
+    'mysql.info.table.rows.changed',
+]
+
 # Possibly from SHOW GLOBAL VARIABLES
 VARIABLES_VARS = [
     'mysql.myisam.key_buffer_size',
@@ -85,6 +92,7 @@ INNODB_VARS = [
     'mysql.innodb.buffer_pool_read_requests',
     'mysql.innodb.buffer_pool_reads',
     'mysql.innodb.buffer_pool_utilization',
+    'mysql.innodb.deadlocks',
 ]
 
 COMPLEX_INNODB_VARS = [
@@ -244,6 +252,13 @@ OPTIONAL_INNODB_VARS = [
 
 PERFORMANCE_VARS = ['mysql.performance.query_run_time.avg', 'mysql.performance.digest_95th_percentile.avg_us']
 
+COMMON_PERFORMANCE_VARS = ['mysql.performance.user_connections']
+
+# This exists to comply with some of the testing patterns with the old API.
+QUERY_EXECUTOR_METRIC_SETS = {
+    'user_connections': ('mysql.performance.user_connections', 'guage'),
+}
+
 SCHEMA_VARS = ['mysql.info.schema.size']
 
 SYNTHETIC_VARS = ['mysql.performance.qcache.utilization', 'mysql.performance.qcache.utilization.instant']
@@ -254,10 +269,49 @@ GROUP_REPLICATION_VARS = [
     'mysql.replication.group.member_status',
     'mysql.replication.group.conflicts_detected',
     'mysql.replication.group.transactions',
-    'mysql.replication.group.transactions_applied',
-    'mysql.replication.group.transactions_in_applier_queue',
     'mysql.replication.group.transactions_check',
+    'mysql.replication.group.transactions_validating',
+]
+
+GROUP_REPLICATION_VARS_8_0_2 = [
+    'mysql.replication.group.transactions_in_applier_queue',
+    'mysql.replication.group.transactions_applied',
     'mysql.replication.group.transactions_proposed',
     'mysql.replication.group.transactions_rollback',
-    'mysql.replication.group.transactions_validating',
+]
+
+INDEX_SIZE_VARS = [
+    'mysql.index.size',
+]
+INDEX_USAGE_VARS = [
+    'mysql.index.reads',
+    'mysql.index.updates',
+    'mysql.index.deletes',
+]
+
+SIMPLE_OPERATION_TIME_METRICS = [
+    'status_metrics',
+    'innodb_metrics',
+    'variables_metrics',
+    'binary_log_metrics',
+]
+
+COMPLEX_OPERATION_TIME_METRICS = [
+    'schema_size_metrics',
+    'system_table_size_metrics',
+    'table_size_metrics',
+]
+
+REPLICATION_OPERATION_TIME_METRICS = ['replication_metrics']
+
+GROUP_REPLICATION_OPERATION_TIME_METRICS = ['group_replication_metrics']
+
+PERFORMANCE_OPERATION_TIME_METRICS = ['exec_time_95th_metrics', 'exec_time_per_schema_metrics']
+
+COMMON_PERFORMANCE_OPERATION_TIME_METRICS = ['performance_schema.threads']
+
+OPERATION_TIME_METRIC_NAME = 'dd.mysql.operation.time'
+
+E2E_OPERATION_TIME_METRIC_NAME = [
+    'dd.mysql.operation.time.{}'.format(suffix) for suffix in ('avg', 'max', '95percentile', 'count', 'median')
 ]

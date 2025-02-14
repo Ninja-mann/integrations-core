@@ -5,72 +5,89 @@ import copy
 import functools
 import importlib
 import inspect
-import json
 import logging
+import os
 import re
 import traceback
 import unicodedata
 from collections import deque
 from os.path import basename
-from typing import TYPE_CHECKING, Any, AnyStr, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import (  # noqa: F401
+    TYPE_CHECKING,
+    Any,
+    AnyStr,
+    Callable,
+    Deque,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
 import yaml
-from six import PY2, binary_type, iteritems, raise_from, text_type
+from pydantic import BaseModel, ValidationError
+
+from datadog_checks.base.agent import AGENT_RUNNING, aggregator, datadog_agent
 
 from ..config import is_affirmative
 from ..constants import ServiceCheck
 from ..errors import ConfigurationError
 from ..types import (
-    AgentConfigType,
-    Event,
-    ExternalTagType,
-    InitConfigType,
-    InstanceType,
-    ProxySettings,
-    ServiceCheckStatus,
+    AgentConfigType,  # noqa: F401
+    Event,  # noqa: F401
+    ExternalTagType,  # noqa: F401
+    InitConfigType,  # noqa: F401
+    InstanceType,  # noqa: F401
+    ProxySettings,  # noqa: F401
+    ServiceCheckStatus,  # noqa: F401
 )
 from ..utils.agent.utils import should_profile_memory
 from ..utils.common import ensure_bytes, to_native_string
+from ..utils.diagnose import Diagnosis
+from ..utils.fips import enable_fips
 from ..utils.http import RequestsWrapper
 from ..utils.limiter import Limiter
 from ..utils.metadata import MetadataManager
 from ..utils.secrets import SecretsSanitizer
+from ..utils.serialization import from_json, to_json
 from ..utils.tagging import GENERIC_TAGS
 from ..utils.tls import TlsContextWrapper
 from ..utils.tracing import traced_class
 
-try:
-    import datadog_agent
-
+if AGENT_RUNNING:
     from ..log import CheckLoggingAdapter, init_logging
 
-    init_logging()
-except ImportError:
-    from ..stubs import datadog_agent
+else:
     from ..stubs.log import CheckLoggingAdapter, init_logging
 
-    init_logging()
-
-try:
-    import aggregator
-
-    using_stub_aggregator = False
-except ImportError:
-    from ..stubs import aggregator
-
-    using_stub_aggregator = True
-
+init_logging()
 
 if datadog_agent.get_config('disable_unsafe_yaml'):
     from ..ddyaml import monkey_patch_pyyaml
 
     monkey_patch_pyyaml()
 
-if not PY2:
-    from pydantic import ValidationError
+if datadog_agent.get_config('integration_tracing'):
+    from ddtrace import patch
+
+    # handle thread monitoring as an additional option
+    # See: http://pypi.datadoghq.com/trace/docs/other_integrations.html#futures
+    if datadog_agent.get_config('integration_tracing_futures'):
+        patch(logging=True, requests=True, futures=True)
+    else:
+        patch(logging=True, requests=True)
+
+if is_affirmative(datadog_agent.get_config('integration_profiling')):
+    from ddtrace.profiling import Profiler
+
+    prof = Profiler(service='datadog-agent-integrations')
+    prof.start()
 
 if TYPE_CHECKING:
-    import ssl
+    import ssl  # noqa: F401
 
 # Metric types for which it's only useful to submit once per set of tags
 ONE_PER_CONTEXT_METRIC_TYPES = [aggregator.GAUGE, aggregator.RATE, aggregator.MONOTONIC_COUNT]
@@ -131,10 +148,6 @@ class AgentCheck(object):
     # a mapping type, then each key will be considered a `name` and will be sent with its (str) value.
     METADATA_TRANSFORMERS = None
 
-    # Default fields to whitelist for metadata submission
-    METADATA_DEFAULT_CONFIG_INIT_CONFIG = None
-    METADATA_DEFAULT_CONFIG_INSTANCE = None
-
     FIRST_CAP_RE = re.compile(br'(.)([A-Z][a-z]+)')
     ALL_CAP_RE = re.compile(br'([a-z0-9])([A-Z])')
     METRIC_REPLACEMENT = re.compile(br'([^a-zA-Z0-9_.]+)|(^[^a-zA-Z]+)')
@@ -151,6 +164,8 @@ class AgentCheck(object):
     # See https://github.com/DataDog/integrations-core/pull/2093 for more information.
     DEFAULT_METRIC_LIMIT = 0
 
+    HA_SUPPORTED = False
+
     # Allow tracing for classic integrations
     def __init_subclass__(cls, *args, **kwargs):
         try:
@@ -163,9 +178,13 @@ class AgentCheck(object):
     def __init__(self, *args, **kwargs):
         # type: (*Any, **Any) -> None
         """
-        - **name** (_str_) - the name of the check
-        - **init_config** (_dict_) - the `init_config` section of the configuration.
-        - **instance** (_List[dict]_) - a one-element list containing the instance options from the
+        Parameters:
+            name (str):
+                the name of the check
+            init_config (dict):
+                the `init_config` section of the configuration.
+            instance (list[dict]):
+                a one-element list containing the instance options from the
                 configuration file (a list is used to keep backward compatibility with
                 older versions of the Agent).
         """
@@ -285,10 +304,23 @@ class AgentCheck(object):
         self._config_model_shared = None  # type: Any
 
         # Functions that will be called exactly once (if successful) before the first check run
-        self.check_initializations = deque([self.send_config_metadata])  # type: Deque[Callable[[], None]]
+        self.check_initializations = deque()  # type: Deque[Callable[[], None]]
 
-        if not PY2:
-            self.check_initializations.append(self.load_configuration_models)
+        self.check_initializations.append(self.load_configuration_models)
+
+        self.__formatted_tags = None
+        self.__logs_enabled = None
+
+        if os.environ.get("GOFIPS", "0") == "1":
+            enable_fips()
+
+        ha_enabled_init = self.init_config.get('ha_enabled', False) if self.init_config else False
+        ha_enabled_instance = self.instance.get('ha_enabled', False) if self.instance else False
+
+        if not self.HA_SUPPORTED and (ha_enabled_init or ha_enabled_instance):
+            raise ConfigurationError(
+                f"High Availability is enabled for check {self.name} but this integration does not support it"
+            )
 
     def _create_metrics_pattern(self, metric_patterns, option_name):
         all_patterns = metric_patterns.get(option_name, [])
@@ -379,6 +411,46 @@ class AgentCheck(object):
 
         return self._http
 
+    @property
+    def logs_enabled(self):
+        # type: () -> bool
+        """
+        Returns True if logs are enabled, False otherwise.
+        """
+        if self.__logs_enabled is None:
+            self.__logs_enabled = bool(datadog_agent.get_config('logs_enabled'))
+
+        return self.__logs_enabled
+
+    @property
+    def formatted_tags(self):
+        # type: () -> str
+        if self.__formatted_tags is None:
+            normalized_tags = set()
+            for tag in self.instance.get('tags', []):
+                key, _, value = tag.partition(':')
+                if not value:
+                    continue
+
+                if self.disable_generic_tags and key in GENERIC_TAGS:
+                    key = '{}_{}'.format(self.name, key)
+
+                normalized_tags.add('{}:{}'.format(key, value))
+
+            self.__formatted_tags = ','.join(sorted(normalized_tags))
+
+        return self.__formatted_tags
+
+    @property
+    def diagnosis(self):
+        # type: () -> Diagnosis
+        """
+        A Diagnosis object to register explicit diagnostics and record diagnoses.
+        """
+        if not hasattr(self, '_diagnosis'):
+            self._diagnosis = Diagnosis(sanitize=self.sanitize)
+        return self._diagnosis
+
     def get_tls_context(self, refresh=False, overrides=None):
         # type: (bool, Dict[AnyStr, Any]) -> ssl.SSLContext
         """
@@ -405,7 +477,7 @@ class AgentCheck(object):
         Used for sending metadata via Go bindings.
         """
         if not hasattr(self, '_metadata_manager'):
-            if not self.check_id and not using_stub_aggregator:
+            if not self.check_id and AGENT_RUNNING:
                 raise RuntimeError('Attribute `check_id` must be set')
 
             self._metadata_manager = MetadataManager(self.name, self.check_id, self.log, self.METADATA_TRANSFORMERS)
@@ -443,7 +515,12 @@ class AgentCheck(object):
         models_config = models_config or {}
         typos = set()  # type: Set[str]
 
-        known_options = [k for k, _ in models_config]  # type: List[str]
+        known_options = {k for k, _ in models_config}  # type: Set[str]
+
+        if isinstance(models_config, BaseModel):
+            # Also add aliases, if any
+            known_options.update(set(models_config.model_dump(by_alias=True)))
+
         unknown_options = [option for option in user_configs.keys() if option not in known_options]  # type: List[str]
 
         for unknown_option in unknown_options:
@@ -469,37 +546,32 @@ class AgentCheck(object):
             module_parts = self.__module__.split('.')
             package_path = '{}.config_models'.format('.'.join(module_parts[:2]))
         if self._config_model_shared is None:
-            raw_shared_config = self._get_config_model_initialization_data()
-            intg_shared_config = self._get_shared_config()
-            raw_shared_config.update(intg_shared_config)
-
-            shared_config = self.load_configuration_model(package_path, 'SharedConfig', raw_shared_config)
+            shared_config = copy.deepcopy(self.init_config)
+            context = self._get_config_model_context(shared_config)
+            shared_model = self.load_configuration_model(package_path, 'SharedConfig', shared_config, context)
             try:
-                self.log_typos_in_options(intg_shared_config, shared_config, 'init_config')
+                self.log_typos_in_options(shared_config, shared_model, 'init_config')
             except Exception as e:
                 self.log.debug("Failed to detect typos in `init_config` section: %s", e)
-            if shared_config is not None:
-                self._config_model_shared = shared_config
+            if shared_model is not None:
+                self._config_model_shared = shared_model
 
         if self._config_model_instance is None:
-            raw_instance_config = self._get_config_model_initialization_data()
-            intg_instance_config = self._get_instance_config()
-            raw_instance_config.update(intg_instance_config)
-
-            instance_config = self.load_configuration_model(package_path, 'InstanceConfig', raw_instance_config)
+            instance_config = copy.deepcopy(self.instance)
+            context = self._get_config_model_context(instance_config)
+            instance_model = self.load_configuration_model(package_path, 'InstanceConfig', instance_config, context)
             try:
-                self.log_typos_in_options(intg_instance_config, instance_config, 'instances')
+                self.log_typos_in_options(instance_config, instance_model, 'instances')
             except Exception as e:
                 self.log.debug("Failed to detect typos in `instances` section: %s", e)
-            if instance_config is not None:
-                self._config_model_instance = instance_config
+            if instance_model is not None:
+                self._config_model_instance = instance_model
 
     @staticmethod
-    def load_configuration_model(import_path, model_name, config):
+    def load_configuration_model(import_path, model_name, config, context):
         try:
             package = importlib.import_module(import_path)
-        # TODO: remove the type ignore when we drop Python 2
-        except ModuleNotFoundError as e:  # type: ignore
+        except ModuleNotFoundError as e:
             # Don't fail if there are no models
             if str(e).startswith('No module named '):
                 return
@@ -509,9 +581,8 @@ class AgentCheck(object):
         model = getattr(package, model_name, None)
         if model is not None:
             try:
-                config_model = model(**config)
-            # TODO: remove the type ignore when we drop Python 2
-            except ValidationError as e:  # type: ignore
+                config_model = model.model_validate(config, context=context)
+            except ValidationError as e:
                 errors = e.errors()
                 num_errors = len(errors)
                 message_lines = [
@@ -530,21 +601,12 @@ class AgentCheck(object):
                     )
                     message_lines.append('  {}'.format(error['msg']))
 
-                raise_from(ConfigurationError('\n'.join(message_lines)), None)
+                raise ConfigurationError('\n'.join(message_lines)) from None
             else:
                 return config_model
 
-    def _get_shared_config(self):
-        # Any extra fields will be available during a config model's initial validation stage
-        return copy.deepcopy(self.init_config)
-
-    def _get_instance_config(self):
-        # Any extra fields will be available during a config model's initial validation stage
-        return copy.deepcopy(self.instance)
-
-    def _get_config_model_initialization_data(self):
-        # Allow for advanced functionality during the initial root validation stage
-        return {'__data': {'logger': self.log, 'warning': self.warning}}
+    def _get_config_model_context(self, config):
+        return {'logger': self.log, 'warning': self.warning, 'configured_fields': frozenset(config)}
 
     def register_secret(self, secret):
         # type: (str) -> None
@@ -589,7 +651,7 @@ class AgentCheck(object):
             err_msg = 'Histogram: {} has non integer value: {}. Only integer are valid bucket values (count).'.format(
                 repr(name), repr(value)
             )
-            if using_stub_aggregator:
+            if not AGENT_RUNNING:
                 raise ValueError(err_msg)
             self.warning(err_msg)
             return
@@ -631,6 +693,27 @@ class AgentCheck(object):
             return
 
         aggregator.submit_event_platform_event(self, self.check_id, to_native_string(raw_event), "dbm-activity")
+
+    def database_monitoring_metadata(self, raw_event):
+        # type: (str) -> None
+        if raw_event is None:
+            return
+
+        aggregator.submit_event_platform_event(self, self.check_id, to_native_string(raw_event), "dbm-metadata")
+
+    def event_platform_event(self, raw_event, event_track_type):
+        # type: (str, str) -> None
+        """Send an event platform event.
+
+        Parameters:
+            raw_event (str):
+                JSON formatted string representing the event to send
+            event_track_type (str):
+                type of event ingested and processed by the event platform
+        """
+        if raw_event is None:
+            return
+        aggregator.submit_event_platform_event(self, self.check_id, to_native_string(raw_event), event_track_type)
 
     def should_send_metric(self, metric_name):
         return not self._metric_excluded(metric_name) and self._metric_included(metric_name)
@@ -680,7 +763,7 @@ class AgentCheck(object):
             err_msg = 'Metric: {} has non float value: {}. Only float values can be submitted as metrics.'.format(
                 repr(name), repr(value)
             )
-            if using_stub_aggregator:
+            if not AGENT_RUNNING:
                 raise ValueError(err_msg)
             self.warning(err_msg)
             return
@@ -691,15 +774,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Sample a gauge metric.
 
-        **Parameters:**
-
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._submit_metric(
             aggregator.GAUGE, name, value, tags=tags, hostname=hostname, device_name=device_name, raw=raw
@@ -709,13 +796,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Sample a raw count metric.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._submit_metric(
             aggregator.COUNT, name, value, tags=tags, hostname=hostname, device_name=device_name, raw=raw
@@ -727,14 +820,21 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool, bool) -> None
         """Sample an increasing counter metric.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
-        - **flush_first_value** (_bool_) - whether to sample the first value
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
+            flush_first_value (bool):
+                whether to sample the first value
         """
         self._submit_metric(
             aggregator.MONOTONIC_COUNT,
@@ -751,13 +851,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Sample a point, with the rate calculated at the end of the check.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._submit_metric(
             aggregator.RATE, name, value, tags=tags, hostname=hostname, device_name=device_name, raw=raw
@@ -767,13 +873,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Sample a histogram metric.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._submit_metric(
             aggregator.HISTOGRAM, name, value, tags=tags, hostname=hostname, device_name=device_name, raw=raw
@@ -783,13 +895,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Sample a histogram based on rate metrics.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._submit_metric(
             aggregator.HISTORATE, name, value, tags=tags, hostname=hostname, device_name=device_name, raw=raw
@@ -799,13 +917,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Increment a counter metric.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._log_deprecation('increment')
         self._submit_metric(
@@ -816,13 +940,19 @@ class AgentCheck(object):
         # type: (str, float, Sequence[str], str, str, bool) -> None
         """Decrement a counter metric.
 
-        - **name** (_str_) - the name of the metric
-        - **value** (_float_) - the value for the metric
-        - **tags** (_List[str]_) - a list of tags to associate with this metric
-        - **hostname** (_str_) - a hostname to associate with this metric. Defaults to the current host.
-        - **device_name** (_str_) - **deprecated** add a tag in the form `device:<device_name>` to the `tags`
-            list instead.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the metric
+            value (float):
+                the value for the metric
+            tags (list[str]):
+                a list of tags to associate with this metric
+            hostname (str):
+                a hostname to associate with this metric. Defaults to the current host.
+            device_name (str):
+                **deprecated** add a tag in the form `device:<device_name>` to the `tags` list instead.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         self._log_deprecation('increment')
         self._submit_metric(
@@ -833,11 +963,17 @@ class AgentCheck(object):
         # type: (str, ServiceCheckStatus, Sequence[str], str, str, bool) -> None
         """Send the status of a service.
 
-        - **name** (_str_) - the name of the service check
-        - **status** (_int_) - a constant describing the service status.
-        - **tags** (_List[str]_) - a list of tags to associate with this service check
-        - **message** (_str_) - additional information or a description of why this status occurred.
-        - **raw** (_bool_) - whether to ignore any defined namespace prefix
+        Parameters:
+            name (str):
+                the name of the service check
+            status (int):
+                a constant describing the service status
+            tags (list[str]):
+                a list of tags to associate with this service check
+            message (str):
+                additional information or a description of why this status occurred.
+            raw (bool):
+                whether to ignore any defined namespace prefix
         """
         tags = self._normalize_tags_type(tags or [])
         if hostname is None:
@@ -852,6 +988,42 @@ class AgentCheck(object):
         aggregator.submit_service_check(
             self, self.check_id, self._format_namespace(name, raw), status, tags, hostname, message
         )
+
+    def send_log(self, data, cursor=None, stream='default'):
+        # type: (dict[str, str], dict[str, Any] | None, str) -> None
+        """Send a log for submission.
+
+        Parameters:
+            data (dict[str, str]):
+                The log data to send. The following keys are treated specially, if present:
+
+                - timestamp: should be an integer or float representing the number of seconds since the Unix epoch
+                - ddtags: if not defined, it will automatically be set based on the instance's `tags` option
+            cursor (dict[str, Any] or None):
+                Metadata associated with the log which will be saved to disk. The most recent value may be
+                retrieved with the `get_log_cursor` method.
+            stream (str):
+                The stream associated with this log, used for accurate cursor persistence.
+                Has no effect if `cursor` argument is `None`.
+        """
+        attributes = data.copy()
+        if 'ddtags' not in attributes and self.formatted_tags:
+            attributes['ddtags'] = self.formatted_tags
+
+        timestamp = attributes.get('timestamp')
+        if timestamp is not None:
+            # convert seconds to milliseconds
+            attributes['timestamp'] = int(timestamp * 1000)
+
+        datadog_agent.send_log(to_json(attributes), self.check_id)
+        if cursor is not None:
+            self.write_persistent_cache('log_cursor_{}'.format(stream), to_json(cursor))
+
+    def get_log_cursor(self, stream='default'):
+        # type: (str) -> dict[str, Any] | None
+        """Returns the most recent log cursor from disk."""
+        data = self.read_persistent_cache('log_cursor_{}'.format(stream))
+        return from_json(data) if data else None
 
     def _log_deprecation(self, deprecation_key, *args):
         # type: (str, *str) -> None
@@ -872,21 +1044,18 @@ class AgentCheck(object):
 
     def set_metadata(self, name, value, **options):
         # type: (str, Any, **Any) -> None
-        """Updates the cached metadata ``name`` with ``value``, which is then sent by the Agent at regular intervals.
+        """Updates the cached metadata `name` with `value`, which is then sent by the Agent at regular intervals.
 
-        :param str name: the name of the metadata
-        :param object value: the value for the metadata. if ``name`` has no transformer defined then the
-                             raw ``value`` will be submitted and therefore it must be a ``str``
-        :param options: keyword arguments to pass to any defined transformer
+        Parameters:
+            name (str):
+                the name of the metadata
+            value (Any):
+                the value for the metadata. if ``name`` has no transformer defined then the
+                raw ``value`` will be submitted and therefore it must be a ``str``
+            options (Any):
+                keyword arguments to pass to any defined transformer
         """
         self.metadata_manager.submit(name, value, options)
-
-    def send_config_metadata(self):
-        # type: () -> None
-        self.set_metadata('config', self.instance, section='instance', whitelist=self.METADATA_DEFAULT_CONFIG_INSTANCE)
-        self.set_metadata(
-            'config', self.init_config, section='init_config', whitelist=self.METADATA_DEFAULT_CONFIG_INIT_CONFIG
-        )
 
     @staticmethod
     def is_metadata_collection_enabled():
@@ -928,7 +1097,9 @@ class AgentCheck(object):
         # type: (str) -> str
         """Returns the value previously stored with `write_persistent_cache` for the same `key`.
 
-        - **key** (_str_) - The key to retrieve
+        Parameters:
+            key (str):
+                the key to retrieve
         """
         return datadog_agent.read_persistent_cache(self._persistent_cache_id(key))
 
@@ -940,8 +1111,11 @@ class AgentCheck(object):
             - `/opt/datadog-agent/run` everywhere else.
         The cache is persistent between agent restarts but will be rebuilt if the check instance configuration changes.
 
-        - **key** (_str_) - Identifier used to build the filename
-        - **value** (_str_) - Value to store
+        Parameters:
+            key (str):
+                the key to retrieve
+            value (str):
+                the value to store
         """
         datadog_agent.write_persistent_cache(self._persistent_cache_id(key), value)
 
@@ -956,7 +1130,7 @@ class AgentCheck(object):
             new_tags = []
             for hostname, source_map in external_tags:
                 new_tags.append((to_native_string(hostname), source_map))
-                for src_name, tags in iteritems(source_map):
+                for src_name, tags in source_map.items():
                     source_map[src_name] = self._normalize_tags_type(tags)
             datadog_agent.set_external_tags(new_tags)
         except IndexError:
@@ -977,14 +1151,18 @@ class AgentCheck(object):
 
     def warning(self, warning_message, *args, **kwargs):
         # type: (str, *Any, **Any) -> None
-        """Log a warning message and display it in the Agent's status page.
+        """Log a warning message, display it in the Agent's status page and in-app.
 
         Using *args is intended to make warning work like log.warn/debug/info/etc
         and make it compliant with flake8 logging format linter.
 
-        :param str warning_message: the warning message.
-        :param list args: format string args used to format warning_message e.g. `warning_message % args`
-        :param dict kwargs: not used for now, but added to match Python logger's `warning` method signature
+        Parameters:
+            warning_message (str):
+                the warning message
+            args (Any):
+                format string args used to format the warning message e.g. `warning_message % args`
+            kwargs (Any):
+                not used for now, but added to match Python logger's `warning` method signature
         """
         warning_message = to_native_string(warning_message)
         # Interpolate message only if args is not empty. Same behavior as python logger:
@@ -1007,6 +1185,16 @@ class AgentCheck(object):
         warnings = self.warnings
         self.warnings = []
         return warnings
+
+    def get_diagnoses(self):
+        # type: () -> str
+        """
+        Return the list of diagnosis as a JSON encoded string.
+
+        The agent calls this method to retrieve diagnostics from integrations. This method
+        runs explicit diagnostics if available.
+        """
+        return to_json([d._asdict() for d in (self.diagnosis.diagnoses + self.diagnosis.run_explicit())])
 
     def _get_requests_proxy(self):
         # type: () -> ProxySettings
@@ -1034,13 +1222,14 @@ class AgentCheck(object):
     def normalize(self, metric, prefix=None, fix_case=False):
         # type: (Union[str, bytes], Union[str, bytes], bool) -> str
         """
-        Turn a metric into a well-formed metric name
-        prefix.b.c
-        :param metric The metric name to normalize
-        :param prefix A prefix to to add to the normalized name, default None
-        :param fix_case A boolean, indicating whether to make sure that the metric name returned is in "snake_case"
+        Turn a metric into a well-formed metric name prefix.b.c
+
+        Parameters:
+            metric: The metric name to normalize
+            prefix: A prefix to to add to the normalized name, default None
+            fix_case: A boolean, indicating whether to make sure that the metric name returned is in "snake_case"
         """
-        if isinstance(metric, text_type):
+        if isinstance(metric, str):
             metric = unicodedata.normalize('NFKD', metric).encode('ascii', 'ignore')
 
         if fix_case:
@@ -1065,7 +1254,7 @@ class AgentCheck(object):
         This happens for legacy reasons, when we cleaned up some characters (like '-')
         which are allowed in tags.
         """
-        if isinstance(tag, text_type):
+        if isinstance(tag, str):
             tag = tag.encode('utf-8', 'ignore')
         tag = self.TAG_REPLACEMENT.sub(br'_', tag)
         tag = self.MULTIPLE_UNDERSCORE_CLEANUP.sub(br'_', tag)
@@ -1089,41 +1278,43 @@ class AgentCheck(object):
     def run(self):
         # type: () -> str
         try:
-            while self.check_initializations:
-                initialization = self.check_initializations.popleft()
-                try:
-                    initialization()
-                except Exception:
-                    self.check_initializations.appendleft(initialization)
-                    raise
+            self.diagnosis.clear()
+            # Ignore check initializations if running in a separate process
+            if is_affirmative(self.instance.get('process_isolation', self.init_config.get('process_isolation', False))):
+                from ..utils.replay.execute import run_with_isolation
 
-            instance = copy.deepcopy(self.instances[0])
-
-            if 'set_breakpoint' in self.init_config:
-                from ..utils.agent.debug import enter_pdb
-
-                enter_pdb(self.check, line=self.init_config['set_breakpoint'], args=(instance,))
-            elif 'profile_memory' in self.init_config or (
-                datadog_agent.tracemalloc_enabled() and should_profile_memory(datadog_agent, self.name)
-            ):
-                from ..utils.agent.memory import profile_memory
-
-                metrics = profile_memory(
-                    self.check, self.init_config, namespaces=self.check_id.split(':', 1), args=(instance,)
-                )
-
-                tags = self.get_debug_metric_tags()
-                tags.extend(instance.get('__memory_profiling_tags', []))
-                for m in metrics:
-                    self.gauge(m.name, m.value, tags=tags, raw=True)
+                run_with_isolation(self, aggregator, datadog_agent)
             else:
-                self.check(instance)
+                while self.check_initializations:
+                    initialization = self.check_initializations.popleft()
+                    try:
+                        initialization()
+                    except Exception:
+                        self.check_initializations.appendleft(initialization)
+                        raise
 
-            result = ''
+                instance = copy.deepcopy(self.instances[0])
+
+                if 'set_breakpoint' in self.init_config:
+                    from ..utils.agent.debug import enter_pdb
+
+                    enter_pdb(self.check, line=self.init_config['set_breakpoint'], args=(instance,))
+                elif self.should_profile_memory():
+                    # self.init_config['profile_memory'] could be `/tmp/datadog-agent-memory-profiler*`
+                    # that is generated by Datadog Agent.
+                    # If we use `--m-dir` for `agent check` command, a hidden flag, it should be same as a given value.
+                    namespaces = [self.init_config['profile_memory']]
+                    for id in self.check_id.split(":"):
+                        namespaces.append(id)
+                    self.profile_memory(func=self.check, namespaces=namespaces, args=(instance,))
+                else:
+                    self.check(instance)
+
+            error_report = ''
         except Exception as e:
             message = self.sanitize(str(e))
             tb = self.sanitize(traceback.format_exc())
-            result = json.dumps([{'message': message, 'traceback': tb}])
+            error_report = to_json([{'message': message, 'traceback': tb}])
         finally:
             if self.metric_limiter:
                 if is_affirmative(self.debug_metrics.get('metric_contexts', False)):
@@ -1138,7 +1329,7 @@ class AgentCheck(object):
 
                 self.metric_limiter.reset()
 
-        return result
+        return error_report
 
     def event(self, event):
         # type: (Event) -> None
@@ -1162,11 +1353,13 @@ class AgentCheck(object):
         }
         ```
 
-        - **event** (_dict_) - the event to be sent
+        Parameters:
+            event (dict[str, Any]):
+                the event to be sent
         """
         # Enforce types of some fields, considerably facilitates handling in go bindings downstream
-        for key, value in iteritems(event):
-            if not isinstance(value, (text_type, binary_type)):
+        for key, value in event.items():
+            if not isinstance(value, (str, bytes)):
                 continue
 
             try:
@@ -1243,3 +1436,31 @@ class AgentCheck(object):
         tags = ['check_name:{}'.format(self.name), 'check_version:{}'.format(self.check_version)]
         tags.extend(self.instance.get('tags', []))
         return tags
+
+    def get_memory_profile_tags(self):
+        # type: () -> List[str]
+        tags = self.get_debug_metric_tags()
+        tags.extend(self.instance.get('__memory_profiling_tags', []))
+        return tags
+
+    def should_profile_memory(self):
+        # type: () -> bool
+        return 'profile_memory' in self.init_config or (
+            datadog_agent.tracemalloc_enabled() and should_profile_memory(datadog_agent, self.name)
+        )
+
+    def profile_memory(self, func, namespaces=None, args=(), kwargs=None, extra_tags=None):
+        # type: (Callable[..., Any], Optional[Sequence[str]], Sequence[Any], Optional[Dict[str, Any]], Optional[List[str]]) -> None  # noqa: E501
+        from ..utils.agent.memory import profile_memory
+
+        if namespaces is None:
+            namespaces = self.check_id.split(':', 1)
+
+        tags = self.get_memory_profile_tags()
+        if extra_tags is not None:
+            tags.extend(extra_tags)
+
+        metrics = profile_memory(func, self.init_config, namespaces=namespaces, args=args, kwargs=kwargs)
+
+        for m in metrics:
+            self.gauge(m.name, m.value, tags=tags, raw=True)

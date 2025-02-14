@@ -2,11 +2,11 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import re
+from urllib.parse import urlparse
 
 import mock
 import pytest
 import requests
-from six.moves.urllib.parse import urlparse
 
 from datadog_checks.dev.http import MockResponse
 from datadog_checks.vault import Vault
@@ -32,6 +32,19 @@ class TestVault:
             dd_run_check(c)
 
         aggregator.assert_service_check(Vault.SERVICE_CHECK_CONNECT, count=0)
+
+    @pytest.mark.parametrize('use_openmetrics', [False, True], indirect=True)
+    def test_no_extra_tags(self, aggregator, dd_run_check, use_openmetrics):
+        instance = {'use_openmetrics': use_openmetrics}
+        instance.update(INSTANCES['main'])
+        instance.pop('tags')
+
+        c = Vault(Vault.CHECK_NAME, {}, [instance])
+
+        tag = ['api_url:{}'.format(INSTANCES['main']['api_url'])]
+        dd_run_check(c)
+
+        aggregator.assert_service_check(Vault.SERVICE_CHECK_CONNECT, status=Vault.OK, count=1, tags=tag)
 
     @pytest.mark.parametrize('use_openmetrics', [False, True], indirect=True)
     def test_unsupported_api_version_fallback(self, aggregator, dd_run_check, use_openmetrics):
@@ -459,7 +472,7 @@ class TestVault:
 
         with mock.patch('requests.get', side_effect=mock_requests_get, autospec=True):
             dd_run_check(c)
-            assert not c._replication_dr_secondary_mode
+            assert not c._skip_dr_metric_collection
             aggregator.assert_service_check(Vault.SERVICE_CHECK_CONNECT, status=Vault.OK, count=1)
             aggregator.assert_metric('vault.is_leader', 1)
             assert_all_metrics(aggregator)
@@ -469,7 +482,7 @@ class TestVault:
             c.log.debug.assert_called_with(
                 "Detected vault in replication DR secondary mode, skipping Prometheus metric collection."
             )
-            assert c._replication_dr_secondary_mode
+            assert c._skip_dr_metric_collection
             aggregator.assert_metric('vault.is_leader', 1)
             aggregator.assert_service_check(Vault.SERVICE_CHECK_CONNECT, status=Vault.OK, count=1)
             assert_all_metrics(aggregator)
@@ -698,8 +711,11 @@ class TestVault:
 
     @auth_required
     @pytest.mark.parametrize('use_openmetrics', [False, True], indirect=True)
-    def test_auth_needed_but_no_token(self, aggregator, dd_run_check, instance, global_tags, use_openmetrics):
-        instance = instance()
+    @pytest.mark.parametrize('use_auth_file', [False, True])
+    def test_auth_needed_but_no_token(
+        self, aggregator, dd_run_check, instance, global_tags, use_openmetrics, use_auth_file
+    ):
+        instance = instance(use_auth_file)
         instance['no_token'] = True
         instance['use_openmetrics'] = use_openmetrics
         c = Vault(Vault.CHECK_NAME, {}, [instance])
@@ -782,3 +798,23 @@ class TestVault:
             aggregator.assert_metric('{}.count'.format(metric), tags=global_tags)
 
         aggregator.assert_all_metrics_covered()
+
+
+@pytest.mark.parametrize('use_openmetrics', [False, True], indirect=True)
+def test_x_vault_request_header_is_set(monkeypatch, instance, dd_run_check, use_openmetrics):
+    instance = instance()
+    instance['use_openmetrics'] = use_openmetrics
+
+    c = Vault(Vault.CHECK_NAME, {}, [instance])
+
+    requests_get = requests.get
+    mock_get = mock.Mock(side_effect=requests_get)
+    monkeypatch.setattr(requests, 'get', mock_get)
+
+    dd_run_check(c)
+
+    assert mock_get.call_count > 0
+    for call in mock_get.call_args_list:
+        headers = dict(call.kwargs['headers'])
+        assert 'X-Vault-Request' in headers
+        assert headers['X-Vault-Request'] == 'true'

@@ -9,7 +9,6 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 
 import redis
-from six import iteritems
 
 from datadog_checks.base import AgentCheck, ConfigurationError, ensure_unicode, is_affirmative
 from datadog_checks.base.utils.common import round_value
@@ -71,6 +70,9 @@ class Redis(AgentCheck):
         'bytes_sent_per_sec': 'redis.bytes_sent_per_sec',
         # Note: 'bytes_received_per_sec' and 'bytes_sent_per_sec' are only
         # available on Azure Redis
+        'instantaneous_input_kbps': 'redis.net.instantaneous_input',
+        'instantaneous_output_kbps': 'redis.net.instantaneous_output',
+        'total_connections_received': 'redis.net.total_connections_received',
         # pubsub
         'pubsub_channels': 'redis.pubsub.channels',
         'pubsub_patterns': 'redis.pubsub.patterns',
@@ -173,7 +175,7 @@ class Redis(AgentCheck):
 
                 # Set a default timeout (in seconds) if no timeout is specified in the instance config
                 instance_config['socket_timeout'] = instance_config.get('socket_timeout', 5)
-                connection_params = dict((k, instance_config[k]) for k in list_params if k in instance_config)
+                connection_params = {k: instance_config[k] for k in list_params if k in instance_config}
                 # If caching is disabled, we overwrite the dictionary value so the old connection
                 # will be closed as soon as the corresponding Python object gets garbage collected
                 self.connections[key] = redis.Redis(**connection_params)
@@ -194,14 +196,18 @@ class Redis(AgentCheck):
         return tags
 
     def _check_db(self):
+        tags = list(self.tags)
         conn = self._get_conn(self.instance)
+
         # Ping the database for info, and track the latency.
         # Process the service check: the check passes if we can connect to Redis
-        start = time.time()
-        tags = list(self.tags)
         try:
-            info = conn.info()
-            latency_ms = round_value((time.time() - start) * 1000, 2)
+            # By running a ping first, we get a recent connection in an attempt to
+            # reduce the chance of connection time affecting our latency measurements
+            conn.ping()
+
+            info, info_latency_ms = _call_and_time(conn.info)
+            _, ping_latency_ms = _call_and_time(conn.ping)
 
             self._collect_metadata(info)
         except ValueError as e:
@@ -218,7 +224,8 @@ class Redis(AgentCheck):
         else:
             self.log.debug("Redis role was not found")
 
-        self.gauge('redis.info.latency_ms', latency_ms, tags=tags)
+        self.gauge('redis.info.latency_ms', info_latency_ms, tags=tags)
+        self.gauge('redis.ping.latency_ms', ping_latency_ms, tags=tags)
 
         try:
             config = conn.config_get("maxclients")
@@ -258,7 +265,7 @@ class Redis(AgentCheck):
             elif info_name in self.RATE_KEYS:
                 self.rate(self.RATE_KEYS[info_name], info[info_name], tags=tags)
 
-        for config_key, value in iteritems(config):
+        for config_key, value in config.items():
             metric_name = self.CONFIG_GAUGE_KEYS.get(config_key)
             if metric_name is not None:
                 self.gauge(metric_name, value, tags=tags)
@@ -274,8 +281,7 @@ class Redis(AgentCheck):
                 # client_list is disabled on some environments
                 self.log.debug("Unable to collect client metrics: CLIENT disabled in some managed Redis.")
 
-        # Save the number of commands.
-        self.rate('redis.net.commands', info['total_commands_processed'], tags=tags)
+        self._check_total_commands_processed(info, tags)
         if 'instantaneous_ops_per_sec' in info:
             self.gauge('redis.net.instantaneous_ops_per_sec', info['instantaneous_ops_per_sec'], tags=tags)
 
@@ -286,6 +292,14 @@ class Redis(AgentCheck):
         self._check_replication(info, tags)
         if self.instance.get("command_stats", False):
             self._check_command_stats(conn, tags)
+
+    def _check_total_commands_processed(self, info, tags):
+        # Avoid corner case error by ensuring availability in info before collecting
+        if 'total_commands_processed' in info:
+            # Save the number of commands.
+            self.rate('redis.net.commands', info['total_commands_processed'], tags=tags)
+        else:
+            self.log.debug("total_commands_processed not found in info, skipping. Info: %s", info)
 
     def _check_key_lengths(self, conn, tags):
         """
@@ -376,8 +390,8 @@ class Redis(AgentCheck):
                         lengths_overall[text_key] += 1
                     elif key_type == 'stream':
                         keylen = db_conn.xlen(key)
-                        lengths[text_key]["length"] += 1
-                        lengths_overall[text_key] += 1
+                        lengths[text_key]["length"] += keylen
+                        lengths_overall[text_key] += keylen
                     else:
                         # If the type is unknown, it might be because the key doesn't exist,
                         # which can be because the list is empty. So always send 0 in that case.
@@ -389,7 +403,7 @@ class Redis(AgentCheck):
                     lengths[text_key]["key_type"] = key_type
 
             # Send the metrics for each db in the redis instance.
-            for key, total in iteritems(lengths):
+            for key, total in lengths.items():
                 # Only send non-zeros if tagged per db.
                 if total["length"] > 0:
                     self.gauge(
@@ -401,7 +415,7 @@ class Redis(AgentCheck):
 
         # Warn if a key is missing from the entire redis instance.
         # Send 0 if the key is missing/empty from the entire redis instance.
-        for key, total in iteritems(lengths_overall):
+        for key, total in lengths_overall.items():
             if total == 0:
                 key_tags = ['key:{}'.format(key)]
                 if instance_db:
@@ -489,21 +503,7 @@ class Redis(AgentCheck):
             max_slow_entries = int(self.instance.get(MAX_SLOW_ENTRIES_KEY))
 
         # Get all slowlog entries
-        try:
-            slowlogs = conn.slowlog_get(max_slow_entries)
-        except TypeError as e:
-            # This catch is needed in PY2 because there is a known issue that has only been fixed after redis
-            # dropped python 2 support
-            # issue: https://github.com/andymccurdy/redis-py/issues/1475
-            # fix: https://github.com/andymccurdy/redis-py/pull/1352
-            # TODO: remove once PY2 is no longer supported
-            self.log.exception(e)
-            self.log.error(
-                'There was an error retrieving slowlog, these metrics will be skipped. This issue is fixed on Agent 7+.'
-                ' You can find more information about upgrading to agent 7 in '
-                'https://docs.datadoghq.com/agent/versions/upgrade_to_agent_v7/?tab=linux'
-            )
-            slowlogs = []
+        slowlogs = conn.slowlog_get(max_slow_entries)
 
         # Find slowlog entries between last timestamp and now using start_time
         slowlogs = [s for s in slowlogs if s['start_time'] > self.last_timestamp_seen]
@@ -537,7 +537,7 @@ class Redis(AgentCheck):
             self.warning('Could not retrieve command stats from Redis. INFO COMMANDSTATS only works with Redis >= 2.6.')
             return
 
-        for key, stats in iteritems(command_stats):
+        for key, stats in command_stats.items():
             command = key.split('_', 1)[1]
             command_tags = tags + ['command:{}'.format(command)]
 
@@ -555,3 +555,10 @@ class Redis(AgentCheck):
     def _collect_metadata(self, info):
         if info and 'redis_version' in info:
             self.set_metadata('version', info['redis_version'])
+
+
+def _call_and_time(func):
+    start_time = time.perf_counter()
+    rv = func()
+    end_time = time.perf_counter()
+    return rv, round_value((end_time - start_time) * 1000, 2)

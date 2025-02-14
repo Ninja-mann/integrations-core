@@ -39,6 +39,8 @@ def init_db():
         'quote_cnt': 47,
     }
     client.put(key, bins)
+    # Create at an index
+    client.index_string_create('test', 'characters', 'name', 'idx_characters_name')
 
     batch_keys = []
     for i in range(10):
@@ -55,6 +57,7 @@ def dd_environment():
     with docker_run(
         COMPOSE_FILE,
         conditions=[CheckDockerLogs(COMPOSE_FILE, ['service ready: soon there will be cake!']), WaitFor(init_db)],
+        attempts=2,
     ):
         yield OPENMETRICS_V2_INSTANCE
 

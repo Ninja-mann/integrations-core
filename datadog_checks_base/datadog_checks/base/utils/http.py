@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from io import open
 from ipaddress import ip_address, ip_network
+from urllib.parse import quote, urlparse, urlunparse
 
 import requests
 import requests_unixsocket
@@ -19,15 +20,15 @@ from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
 from requests import auth as requests_auth
 from requests.exceptions import SSLError
 from requests_toolbelt.adapters import host_header_ssl
-from six import PY2, iteritems, string_types
-from six.moves.urllib.parse import quote, urlparse, urlunparse
 from wrapt import ObjectProxy
+
+from datadog_checks.base.agent import datadog_agent
 
 from ..config import is_affirmative
 from ..errors import ConfigurationError
 from .common import ensure_bytes, ensure_unicode
 from .headers import get_default_headers, update_headers
-from .network import CertAdapter, closing, create_socket_connection
+from .network import CertAdapter, create_socket_connection
 from .time import get_timestamp
 
 try:
@@ -35,17 +36,13 @@ try:
 except ImportError:
     from contextlib2 import ExitStack
 
-try:
-    import datadog_agent
-except ImportError:
-    from ..stubs import datadog_agent
-
 # Import lazily to reduce memory footprint and ease installation for development
 requests_aws = None
 requests_kerberos = None
 requests_ntlm = None
+requests_oauthlib = None
+oauth2 = None
 jwt = None
-default_backend = None
 serialization = None
 
 LOGGER = logging.getLogger(__file__)
@@ -54,6 +51,8 @@ LOGGER = logging.getLogger(__file__)
 # which is the default TCP packet retransmission window. See:
 # https://tools.ietf.org/html/rfc2988
 DEFAULT_TIMEOUT = 10
+
+DEFAULT_EXPIRATION = 300
 
 # 16 KiB seems optimal, and is also the standard chunk size of the Bittorrent protocol:
 # https://www.bittorrent.org/beps/bep_0003.html
@@ -95,6 +94,7 @@ STANDARD_FIELDS = {
     'tls_private_key': None,
     'tls_protocols_allowed': DEFAULT_PROTOCOL_VERSIONS,
     'tls_verify': True,
+    'tls_ciphers': 'ALL',
     'timeout': DEFAULT_TIMEOUT,
     'use_legacy_auth_encoding': True,
     'username': None,
@@ -156,9 +156,10 @@ class RequestsWrapper(object):
         'auth_token_handler',
         'request_size',
         'tls_protocols_allowed',
+        'tls_ciphers_allowed',
     )
 
-    def __init__(self, instance, init_config, remapper=None, logger=None):
+    def __init__(self, instance, init_config, remapper=None, logger=None, session=None):
         self.logger = logger or LOGGER
         default_fields = dict(STANDARD_FIELDS)
 
@@ -171,7 +172,7 @@ class RequestsWrapper(object):
         )
 
         # Populate with the default values
-        config = {field: instance.get(field, value) for field, value in iteritems(default_fields)}
+        config = {field: instance.get(field, value) for field, value in default_fields.items()}
 
         # Support non-standard (usually legacy) configurations, for example:
         # {
@@ -187,7 +188,7 @@ class RequestsWrapper(object):
 
         remapper.update(DEFAULT_REMAPPED_FIELDS)
 
-        for remapped_field, data in iteritems(remapper):
+        for remapped_field, data in remapper.items():
             field = data.get('name')
 
             # Ignore fields we don't recognize
@@ -212,7 +213,7 @@ class RequestsWrapper(object):
 
             config[field] = value
 
-        # http://docs.python-requests.org/en/master/user/advanced/#timeouts
+        # https://requests.readthedocs.io/en/latest/user/advanced/#timeouts
         connect_timeout = read_timeout = float(config['timeout'])
         if config['connect_timeout'] is not None:
             connect_timeout = float(config['connect_timeout'])
@@ -220,8 +221,8 @@ class RequestsWrapper(object):
         if config['read_timeout'] is not None:
             read_timeout = float(config['read_timeout'])
 
-        # http://docs.python-requests.org/en/master/user/quickstart/#custom-headers
-        # http://docs.python-requests.org/en/master/user/advanced/#header-ordering
+        # https://requests.readthedocs.io/en/latest/user/quickstart/#custom-headers
+        # https://requests.readthedocs.io/en/latest/user/advanced/#header-ordering
         headers = get_default_headers()
         if config['headers']:
             headers.clear()
@@ -233,7 +234,7 @@ class RequestsWrapper(object):
         # https://toolbelt.readthedocs.io/en/latest/adapters.html#hostheaderssladapter
         self.tls_use_host_header = is_affirmative(config['tls_use_host_header']) and 'Host' in headers
 
-        # http://docs.python-requests.org/en/master/user/authentication/
+        # https://requests.readthedocs.io/en/latest/user/authentication/
         auth_type = config['auth_type'].lower()
         if auth_type not in AUTH_TYPES:
             self.logger.warning('auth_type %s is not supported, defaulting to basic', auth_type)
@@ -257,22 +258,22 @@ class RequestsWrapper(object):
 
         allow_redirects = is_affirmative(config['allow_redirects'])
 
-        # http://docs.python-requests.org/en/master/user/advanced/#ssl-cert-verification
+        # https://requests.readthedocs.io/en/latest/user/advanced/#ssl-cert-verification
         verify = True
-        if isinstance(config['tls_ca_cert'], string_types):
+        if isinstance(config['tls_ca_cert'], str):
             verify = config['tls_ca_cert']
         elif not is_affirmative(config['tls_verify']):
             verify = False
 
-        # http://docs.python-requests.org/en/master/user/advanced/#client-side-certificates
+        # https://requests.readthedocs.io/en/latest/user/advanced/#client-side-certificates
         cert = None
-        if isinstance(config['tls_cert'], string_types):
-            if isinstance(config['tls_private_key'], string_types):
+        if isinstance(config['tls_cert'], str):
+            if isinstance(config['tls_private_key'], str):
                 cert = (config['tls_cert'], config['tls_private_key'])
             else:
                 cert = config['tls_cert']
 
-        # http://docs.python-requests.org/en/master/user/advanced/#proxies
+        # https://requests.readthedocs.io/en/latest/user/advanced/#proxies
         no_proxy_uris = None
         if is_affirmative(config['skip_proxy']):
             proxies = PROXY_SETTINGS_DISABLED.copy()
@@ -291,11 +292,11 @@ class RequestsWrapper(object):
                 proxies = proxies.copy()
 
                 # TODO: Pass `no_proxy` directly to `requests` once this issue is fixed:
-                # https://github.com/kennethreitz/requests/issues/5000
+                # https://github.com/psf/requests/issues/5000
                 if 'no_proxy' in proxies:
                     no_proxy_uris = proxies.pop('no_proxy')
 
-                    if isinstance(no_proxy_uris, string_types):
+                    if isinstance(no_proxy_uris, str):
                         no_proxy_uris = no_proxy_uris.replace(';', ',').split(',')
             else:
                 proxies = None
@@ -328,10 +329,10 @@ class RequestsWrapper(object):
 
         # For connection and cookie persistence, if desired. See:
         # https://en.wikipedia.org/wiki/HTTP_persistent_connection#Advantages
-        # http://docs.python-requests.org/en/master/user/advanced/#session-objects
-        # http://docs.python-requests.org/en/master/user/advanced/#keep-alive
+        # https://requests.readthedocs.io/en/latest/user/advanced/#session-objects
+        # https://requests.readthedocs.io/en/latest/user/advanced/#keep-alive
         self.persist_connections = self.tls_use_host_header or is_affirmative(config['persist_connections'])
-        self._session = None
+        self._session = session
 
         # Whether or not to log request information like method and url
         self.log_requests = is_affirmative(config['log_requests'])
@@ -349,6 +350,14 @@ class RequestsWrapper(object):
             self.request_hooks.append(lambda: handle_kerberos_keytab(config['kerberos_keytab']))
         if config['kerberos_cache']:
             self.request_hooks.append(lambda: handle_kerberos_cache(config['kerberos_cache']))
+
+        ciphers = config.get('tls_ciphers')
+        if ciphers:
+            if 'ALL' in ciphers:
+                updated_ciphers = "ALL"
+            else:
+                updated_ciphers = ":".join(ciphers)
+        self.tls_ciphers_allowed = updated_ciphers
 
     def get(self, url, **options):
         return self._request('get', url, options)
@@ -426,14 +435,15 @@ class RequestsWrapper(object):
             # fetch the intermediate certs
             parsed_url = urlparse(url)
             hostname = parsed_url.hostname
-            certs = self.fetch_intermediate_certs(hostname)
+            port = parsed_url.port
+            certs = self.fetch_intermediate_certs(hostname, port)
             if not certs:
                 raise e
             # retry the connection via session object
             certadapter = CertAdapter(certs=certs)
             if not persist:
                 session = requests.Session()
-                for option, value in iteritems(self.options):
+                for option, value in self.options.items():
                     setattr(session, option, value)
             else:
                 session = self.session
@@ -447,28 +457,29 @@ class RequestsWrapper(object):
         if not options:
             return self.options
 
-        for option, value in iteritems(self.options):
+        for option, value in self.options.items():
             # Make explicitly set options take precedence
             options.setdefault(option, value)
 
         return options
 
-    def fetch_intermediate_certs(self, hostname):
+    def fetch_intermediate_certs(self, hostname, port=443):
         # TODO: prefer stdlib implementation when available, see https://bugs.python.org/issue18617
         certs = []
 
         try:
-            sock = create_socket_connection(hostname)
+            sock = create_socket_connection(hostname, port)
         except Exception as e:
             self.logger.error('Error occurred while connecting to socket to discover intermediate certificates: %s', e)
             return certs
 
-        with closing(sock):
+        with sock:
             try:
                 context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS)
                 context.verify_mode = ssl.CERT_NONE
+                context.set_ciphers(self.tls_ciphers_allowed)
 
-                with closing(context.wrap_socket(sock, server_hostname=hostname)) as secure_sock:
+                with context.wrap_socket(sock, server_hostname=hostname) as secure_sock:
                     der_cert = secure_sock.getpeercert(binary_form=True)
                     protocol_version = secure_sock.version()
                     if protocol_version and protocol_version not in self.tls_protocols_allowed:
@@ -536,7 +547,7 @@ class RequestsWrapper(object):
             self._session.mount('{}://'.format(UDS_SCHEME), requests_unixsocket.UnixAdapter())
 
             # Attributes can't be passed to the constructor
-            for option, value in iteritems(self.options):
+            for option, value in self.options.items():
                 setattr(self._session, option, value)
 
         return self._session
@@ -592,11 +603,16 @@ def handle_kerberos_cache(cache_file_path):
 def should_bypass_proxy(url, no_proxy_uris):
     # Accepts a URL and a list of no_proxy URIs
     # Returns True if URL should bypass the proxy.
-    parsed_uri = urlparse(url).hostname
+    parsed_uri_parts = urlparse(url)
+    parsed_uri = parsed_uri_parts.hostname
 
     if '*' in no_proxy_uris:
         # A single * character is supported, which matches all hosts, and effectively disables the proxy.
         # See: https://curl.haxx.se/libcurl/c/CURLOPT_NOPROXY.html
+        return True
+
+    if parsed_uri_parts.scheme == "unix":
+        # Unix domain sockets semantically do not make sense to proxy
         return True
 
     for no_proxy_uri in no_proxy_uris:
@@ -627,7 +643,7 @@ def should_bypass_proxy(url, no_proxy_uris):
 
 def create_basic_auth(config):
     # Since this is the default case, only activate when all fields are explicitly set
-    if config['username'] and config['password']:
+    if config['username'] is not None and config['password'] is not None:
         if config['use_legacy_auth_encoding']:
             return config['username'], config['password']
         else:
@@ -794,6 +810,78 @@ class AuthTokenFileReader(object):
             return self._token
 
 
+class AuthTokenOAuthReader(object):
+    def __init__(self, config):
+        self._url = config.get('url', '')
+        if not isinstance(self._url, str):
+            raise ConfigurationError('The `url` setting of `auth_token` reader must be a string')
+        elif not self._url:
+            raise ConfigurationError('The `url` setting of `auth_token` reader is required')
+
+        self._client_id = config.get('client_id', '')
+        if not isinstance(self._client_id, str):
+            raise ConfigurationError('The `client_id` setting of `auth_token` reader must be a string')
+        elif not self._client_id:
+            raise ConfigurationError('The `client_id` setting of `auth_token` reader is required')
+
+        self._client_secret = config.get('client_secret', '')
+        if not isinstance(self._client_secret, str):
+            raise ConfigurationError('The `client_secret` setting of `auth_token` reader must be a string')
+        elif not self._client_secret:
+            raise ConfigurationError('The `client_secret` setting of `auth_token` reader is required')
+
+        self._basic_auth = config.get('basic_auth', False)
+        if not isinstance(self._basic_auth, bool):
+            raise ConfigurationError('The `basic_auth` setting of `auth_token` reader must be a boolean')
+
+        self._fetch_options = {'token_url': self._url}
+        if self._basic_auth:
+            self._fetch_options['auth'] = requests_auth.HTTPBasicAuth(self._client_id, self._client_secret)
+        else:
+            self._fetch_options['client_id'] = self._client_id
+            self._fetch_options['client_secret'] = self._client_secret
+
+        self._options = config.get('options', {})
+        if isinstance(self._options, dict):
+            for key, value in self._options.items():
+                self._fetch_options[key] = value
+
+        self._token = None
+        self._expiration = None
+
+    def read(self, **request):
+        if self._token is None or get_timestamp() >= self._expiration or 'error' in request:
+            global oauth2
+            if oauth2 is None:
+                from oauthlib import oauth2
+
+            global requests_oauthlib
+            if requests_oauthlib is None:
+                import requests_oauthlib
+
+            client = oauth2.BackendApplicationClient(client_id=self._client_id)
+            oauth = requests_oauthlib.OAuth2Session(client=client)
+            response = oauth.fetch_token(**self._fetch_options)
+
+            # https://www.rfc-editor.org/rfc/rfc6749#section-5.2
+            if 'error' in response:
+                raise Exception('OAuth2 client credentials grant error: {}'.format(response['error']))
+
+            # https://www.rfc-editor.org/rfc/rfc6749#section-4.4.3
+            self._token = response['access_token']
+            self._expiration = get_timestamp()
+            try:
+                # According to https://www.rfc-editor.org/rfc/rfc6749#section-5.1, the `expires_in` field is optional
+                self._expiration += _parse_expires_in(response.get('expires_in'))
+            except TypeError:
+                LOGGER.debug(
+                    'The `expires_in` field of the OAuth2 response is not a number, defaulting to %s',
+                    DEFAULT_EXPIRATION,
+                )
+                self._expiration += DEFAULT_EXPIRATION
+            return self._token
+
+
 class DCOSAuthTokenReader(object):
     def __init__(self, config):
         self._login_url = config.get('login_url', '')
@@ -823,10 +911,6 @@ class DCOSAuthTokenReader(object):
     def read(self, **request):
         if self._token is None or 'error' in request:
             with open(self._private_key_path, 'rb') as f:
-                global default_backend
-                if default_backend is None:
-                    from cryptography.hazmat.backends import default_backend
-
                 global serialization
                 if serialization is None:
                     from cryptography.hazmat.primitives import serialization
@@ -835,7 +919,7 @@ class DCOSAuthTokenReader(object):
                 if jwt is None:
                     import jwt
 
-                private_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+                private_key = serialization.load_pem_private_key(f.read(), password=None)
 
                 serialized_private = private_key.private_bytes(
                     encoding=serialization.Encoding.PEM,
@@ -893,6 +977,7 @@ class AuthTokenHeaderWriter(object):
 
 AUTH_TOKEN_READERS = {
     'file': AuthTokenFileReader,
+    'oauth': AuthTokenOAuthReader,
     'dcos_auth': DCOSAuthTokenReader,
 }
 AUTH_TOKEN_WRITERS = {'header': AuthTokenHeaderWriter}
@@ -927,11 +1012,25 @@ def quote_uds_url(url):
     return urlunparse(parsed)
 
 
+def _parse_expires_in(token_expiration):
+    if isinstance(token_expiration, int) or isinstance(token_expiration, float):
+        return token_expiration
+    if isinstance(token_expiration, str):
+        try:
+            token_expiration = int(token_expiration)
+        except ValueError:
+            LOGGER.debug('Could not convert %s to an integer', token_expiration)
+    else:
+        LOGGER.debug('Unexpected type for `expires_in`: %s.', type(token_expiration))
+        token_expiration = None
+
+    return token_expiration
+
+
 # For documentation generation
 # TODO: use an enum and remove STANDARD_FIELDS when mkdocstrings supports it
 class StandardFields(object):
     pass
 
 
-if not PY2:
-    StandardFields.__doc__ = '\n'.join('- `{}`'.format(field) for field in STANDARD_FIELDS)
+StandardFields.__doc__ = '\n'.join('- `{}`'.format(field) for field in STANDARD_FIELDS)

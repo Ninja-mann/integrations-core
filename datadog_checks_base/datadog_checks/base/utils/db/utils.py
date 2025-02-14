@@ -1,6 +1,7 @@
 # (C) Datadog, Inc. 2019-present
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
+import contextlib
 import datetime
 import decimal
 import functools
@@ -10,22 +11,19 @@ import socket
 import threading
 import time
 from concurrent.futures.thread import ThreadPoolExecutor
-from itertools import chain
-from typing import Any, Callable, Dict, List, Tuple
+from ipaddress import IPv4Address
+from typing import Any, Callable, Dict, List, Tuple  # noqa: F401
 
 from cachetools import TTLCache
 
 from datadog_checks.base import is_affirmative
+from datadog_checks.base.agent import datadog_agent
 from datadog_checks.base.log import get_check_logger
-from datadog_checks.base.utils.db.types import Transformer
+from datadog_checks.base.utils.db.types import Transformer  # noqa: F401
 from datadog_checks.base.utils.serialization import json
+from datadog_checks.base.utils.tracing import INTEGRATION_TRACING_SERVICE_NAME, tracing_enabled
 
 from ..common import to_native_string
-
-try:
-    import datadog_agent
-except ImportError:
-    from ....stubs import datadog_agent
 
 logger = logging.getLogger(__file__)
 
@@ -41,22 +39,26 @@ SUBMISSION_METHODS = {
     # These submission methods require more configuration than just a name
     # and a value and therefore must be defined as a custom transformer.
     'service_check': '__service_check',
+    'send_log': '__send_log',
 }
 
 
 def _traced_dbm_async_job_method(f):
-    # traces DBMAsyncJob.run_job only if tracing is enabled
-    if os.getenv('DDEV_TRACE_ENABLED', 'false') == 'true':
+    integration_tracing, _ = tracing_enabled()
+    if integration_tracing:
         try:
             from ddtrace import tracer
 
             @functools.wraps(f)
             def wrapper(self, *args, **kwargs):
                 with tracer.trace(
+                    # match the same primary operation name as the regular integration tracing so that these async job
+                    # resources appear in the resource list alongside the main check resource
                     "run",
-                    service="{}-integration".format(self._check.name),
-                    resource="{}.run_job".format(type(self).__name__),
-                ):
+                    service=INTEGRATION_TRACING_SERVICE_NAME,
+                    resource="{}.{}".format(self._check.name, self._job_name),
+                ) as span:
+                    span.set_tag('_dd.origin', INTEGRATION_TRACING_SERVICE_NAME)
                     self.run_job()
 
             return wrapper
@@ -76,9 +78,7 @@ def create_submission_transformer(submit_method):
             # type: (Dict[str, Any], Tuple[str, Any], Dict[str, Any]) -> None
             kwargs.update(modifiers)
 
-            # TODO: When Python 2 goes away simply do:
-            # submit_method(*creation_args, *call_args, **kwargs)
-            submit_method(*chain(creation_args, call_args), **kwargs)
+            submit_method(*creation_args, *call_args, **kwargs)
 
         return transformer
 
@@ -97,7 +97,6 @@ def create_extra_transformer(column_transformer, source=None):
 
     # Extra transformers that call regular transformers will want to pass values directly.
     else:
-
         transformer = column_transformer
 
     return transformer
@@ -116,13 +115,20 @@ class ConstantRateLimiter:
         self.period_s = 1.0 / self.rate_limit_s if self.rate_limit_s > 0 else 0
         self.last_event = 0
 
-    def sleep(self):
+    def update_last_time_and_sleep(self):
         """
         Sleeps long enough to enforce the rate limit
         """
         elapsed_s = time.time() - self.last_event
         sleep_amount = max(self.period_s - elapsed_s, 0)
         time.sleep(sleep_amount)
+        self.update_last_time()
+
+    def shall_execute(self):
+        elapsed_s = time.time() - self.last_event
+        return elapsed_s >= self.period_s
+
+    def update_last_time(self):
         self.last_event = time.time()
 
 
@@ -144,6 +150,9 @@ class RateLimitingTTLCache(TTLCache):
 
 
 def resolve_db_host(db_host):
+    if db_host and db_host.endswith('.local'):
+        return db_host
+
     agent_hostname = datadog_agent.get_hostname()
     if not db_host or db_host in {'localhost', '127.0.0.1'} or db_host.startswith('/'):
         return agent_hostname
@@ -175,17 +184,58 @@ def resolve_db_host(db_host):
     return db_host
 
 
+def get_agent_host_tags():
+    """
+    Get the tags from the agent host and return them as a list of strings.
+    """
+    result = []
+    host_tags = datadog_agent.get_host_tags()
+    if not host_tags:
+        return result
+    try:
+        tags_dict = json.loads(host_tags) or {}
+        for key, value in tags_dict.items():
+            if isinstance(value, list):
+                result.extend(value)
+            else:
+                raise ValueError(
+                    'Failed to parse {} tags from the agent host because {} is not a list'.format(key, value)
+                )
+    except Exception as e:
+        raise ValueError('Failed to parse tags from the agent host: {}. Error: {}'.format(host_tags, str(e)))
+    return result
+
+
 def default_json_event_encoding(o):
     if isinstance(o, decimal.Decimal):
         return float(o)
     if isinstance(o, (datetime.date, datetime.datetime)):
         return o.isoformat()
+    if isinstance(o, IPv4Address):
+        return str(o)
+    if isinstance(o, bytes):
+        return o.decode('utf-8')
     raise TypeError
 
 
-def obfuscate_sql_with_metadata(query, options=None):
+def obfuscate_sql_with_metadata(query, options=None, replace_null_character=False):
+    """
+    Obfuscate a SQL query and return the obfuscated query and metadata.
+    :param str query: The SQL query to obfuscate.
+    :param dict options: Obfuscation options to pass to the obfuscator.
+    :param bool replace_null_character: Whether to replace embedded null characters \x00 before obfuscating.
+        Note: Setting this parameter to true involves an extra string traversal and copy.
+        Do set this to true if the database allows embedded null characters in text fields, for example SQL Server.
+        Otherwise obfuscation will fail if the query contains embedded null characters.
+    :return: A dict containing the obfuscated query and metadata.
+    :rtype: dict
+    """
     if not query:
         return {'query': '', 'metadata': {}}
+
+    if replace_null_character:
+        # replace embedded null characters \x00 before obfuscating
+        query = query.replace('\x00', '')
 
     statement = datadog_agent.obfuscate_sql(query, options)
     # The `obfuscate_sql` testing stub returns bytes, so we have to handle that here.
@@ -252,6 +302,9 @@ class DBMAsyncJob(object):
         self._job_name = job_name
 
     def cancel(self):
+        """
+        Send a signal to cancel the job loop asynchronously.
+        """
         self._cancel_event.set()
 
     def run_job_loop(self, tags):
@@ -271,7 +324,7 @@ class DBMAsyncJob(object):
         self._last_check_run = time.time()
         if self._run_sync or is_affirmative(os.environ.get('DBM_THREADED_JOB_RUN_SYNC', "false")):
             self._log.debug("Running threaded job synchronously. job=%s", self._job_name)
-            self._run_job_rate_limited()
+            self._run_sync_job_rate_limited()
         elif self._job_loop_future is None or not self._job_loop_future.running():
             self._job_loop_future = DBMAsyncJob.executor.submit(self._job_loop)
         else:
@@ -291,7 +344,14 @@ class DBMAsyncJob(object):
                         "dd.{}.async_job.inactive_stop".format(self._dbms), 1, tags=self._job_tags, raw=True
                     )
                     break
-                self._run_job_rate_limited()
+                if self._check.should_profile_memory():
+                    self._check.profile_memory(
+                        self._run_job_rate_limited,
+                        namespaces=[self._check.name, self._job_name],
+                        extra_tags=self._job_tags,
+                    )
+                else:
+                    self._run_job_rate_limited()
         except Exception as e:
             if self._cancel_event.isSet():
                 # canceling can cause exceptions if the connection is closed the middle of the check run
@@ -329,9 +389,21 @@ class DBMAsyncJob(object):
         if self._rate_limiter.rate_limit_s != rate_limit:
             self._rate_limiter = ConstantRateLimiter(rate_limit)
 
+    def _run_sync_job_rate_limited(self):
+        if self._rate_limiter.shall_execute():
+            self._rate_limiter.update_last_time()
+            self._run_job_traced()
+
     def _run_job_rate_limited(self):
-        self._run_job_traced()
-        self._rate_limiter.sleep()
+        try:
+            self._run_job_traced()
+        except:
+            raise
+        finally:
+            if not self._cancel_event.isSet():
+                self._rate_limiter.update_last_time_and_sleep()
+            else:
+                self._rate_limiter.update_last_time()
 
     @_traced_dbm_async_job_method
     def _run_job_traced(self):
@@ -339,3 +411,33 @@ class DBMAsyncJob(object):
 
     def run_job(self):
         raise NotImplementedError()
+
+
+@contextlib.contextmanager
+def tracked_query(check, operation, tags=None):
+    """
+    A simple context manager that tracks the time spent in a given query operation
+
+    The intention is to use this for context manager is to wrap the execution of a query,
+    that way the time spent waiting for query execution can be tracked as a metric. For example,
+    '''
+    with tracked_query(check, "my_metric_query", tags):
+        cursor.execute(query)
+    '''
+
+    if debug_stats_kwargs is defined on the check instance,
+    it will be called to set additional kwargs when submitting the metric.
+
+    :param check: The check instance
+    :param operation: The name of the query operation being performed.
+    :param tags: A list of tags to apply to the metric.
+    """
+    start_time = time.time()
+    stats_kwargs = {}
+    if hasattr(check, 'debug_stats_kwargs'):
+        stats_kwargs = dict(check.debug_stats_kwargs())
+    stats_kwargs['tags'] = stats_kwargs.get('tags', []) + ["operation:{}".format(operation)] + (tags or [])
+    stats_kwargs['raw'] = True  # always submit as raw to ignore any defined namespace prefix
+    yield
+    elapsed_ms = (time.time() - start_time) * 1000
+    check.histogram("dd.{}.operation.time".format(check.name), elapsed_ms, **stats_kwargs)

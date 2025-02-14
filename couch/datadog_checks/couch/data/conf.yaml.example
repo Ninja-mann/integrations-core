@@ -41,7 +41,7 @@ init_config:
     #
     # service: <SERVICE>
 
-## Every instance is scheduled independent of the others.
+## Every instance is scheduled independently of the others.
 #
 instances:
 
@@ -60,6 +60,15 @@ instances:
     #
     # password: <PASSWORD>
 
+    ## @param enable_per_db_metrics - boolean - optional - default: true
+    ## If `enable_per_db_metrics` is set to `true`, the check collects metrics
+    ## for each database. If you have a large number of databases, 
+    ## the collection of these metrics could be slow and resource-intensive. If 
+    ## you're affected by performance issues, set `enable_per_db_metrics` to 
+    ## `false`.
+    #
+    # enable_per_db_metrics: true
+
     ## @param db_include - list of strings - optional
     ## The `db_include` should contain the names of the databases meant to be checked.
     ## If no include list is specified, all databases will be checked.
@@ -67,6 +76,8 @@ instances:
     ## Note that no more than 50 databases can be checked at the same time, if you have
     ## included more than 50 or if you have more than 50 databases update the `max_dbs_per_check`
     ## parameter accordingly.
+    ##
+    ## This parameter only has an effect if `enable_per_db_metrics` is set to `true`.
     #
     # db_include:
     #   - <DATABASE_1>
@@ -76,6 +87,8 @@ instances:
     ## The `db_exclude` should contain the names of any databases meant to be excluded
     ## from being checked. If a database is listed both as included and excluded,
     ## the exclusion takes precedence.
+    ##
+    ## This parameter only has an effect if `enable_per_db_metrics` is set to `true`.
     #
     # db_exclude:
     #   - <DATABASE_1>
@@ -274,13 +287,24 @@ instances:
     ##     path (required): The absolute path for the file to read from.
     ##     pattern: A regular expression pattern with a single capture group used to find the
     ##              token rather than using the entire file, for example: Your secret is (.+)
+    ##   - type: oauth
+    ##     url (required): The token endpoint.
+    ##     client_id (required): The client identifier.
+    ##     client_secret (required): The client secret.
+    ##     basic_auth: Whether the provider expects credentials to be transmitted in
+    ##                 an HTTP Basic Auth header. The default is: false
+    ##     options: Mapping of additional options to pass to the provider, such as the audience
+    ##              or the scope. For example:
+    ##                 options:
+    ##                   audience: https://example.com
+    ##                   scope: read:example
     ##
     ## The available writers are:
     ##
     ##   - type: header
     ##     name (required): The name of the field, for example: Authorization
     ##     value: The template value, for example `Bearer <TOKEN>`. The default is: <TOKEN>
-    ##     placeholder: The substring in `value` to replace by the token, defaults to: <TOKEN>
+    ##     placeholder: The substring in `value` to replace with the token, defaults to: <TOKEN>
     #
     # auth_token:
     #   reader:
@@ -352,8 +376,8 @@ instances:
     ## @param tls_ca_cert - string - optional
     ## The path to a file of concatenated CA certificates in PEM format or a directory
     ## containing several CA certificates in PEM format. If a directory, the directory
-    ## must have been processed using the c_rehash utility supplied with OpenSSL. See:
-    ## https://www.openssl.org/docs/manmaster/man3/SSL_CTX_load_verify_locations.html
+    ## must have been processed using the `openssl rehash` command. See:
+    ## https://www.openssl.org/docs/man3.2/man1/c_rehash.html
     #
     # tls_ca_cert: <CA_CERT_PATH>
 
@@ -370,6 +394,16 @@ instances:
     #   - SSLv3
     #   - TLSv1.2
     #   - TLSv1.3
+
+    ## @param tls_ciphers - list of strings - optional
+    ## The list of ciphers suites to use when connecting to an endpoint. If not specified, 
+    ## `ALL` ciphers are used. For list of ciphers see: 
+    ## https://www.openssl.org/docs/man1.0.2/man1/ciphers.html
+    #
+    # tls_ciphers:
+    #   - TLS_AES_256_GCM_SHA384
+    #   - TLS_CHACHA20_POLY1305_SHA256
+    #   - TLS_AES_128_GCM_SHA256
 
     ## @param headers - mapping - optional
     ## The headers parameter allows you to send specific headers with every request.
@@ -417,7 +451,7 @@ instances:
     # log_requests: false
 
     ## @param persist_connections - boolean - optional - default: false
-    ## Whether or not to persist cookies and use connection pooling for increased performance.
+    ## Whether or not to persist cookies and use connection pooling for improved performance.
     #
     # persist_connections: false
 
@@ -428,12 +462,12 @@ instances:
 
 ## Log Section
 ##
-## type - required - Type of log input source (tcp / udp / file / windows_event)
+## type - required - Type of log input source (tcp / udp / file / windows_event).
 ## port / path / channel_path - required - Set port if type is tcp or udp.
 ##                                         Set path if type is file.
 ##                                         Set channel_path if type is windows_event.
 ## source  - required - Attribute that defines which integration sent the logs.
-## encoding - optional - For file specifies the file encoding, default is utf-8, other
+## encoding - optional - For file specifies the file encoding. Default is utf-8. Other
 ##                       possible values are utf-16-le and utf-16-be.
 ## service - optional - The name of the service that generates the log.
 ##                      Overrides any `service` defined in the `init_config` section.

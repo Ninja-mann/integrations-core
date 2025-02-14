@@ -3,8 +3,6 @@
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import logging
 
-from six import string_types
-
 from .. import ensure_unicode
 
 try:
@@ -22,7 +20,8 @@ log = logging.getLogger(__name__)
 def get_subprocess_output(command, log, raise_on_empty_output=True, log_debug=True, env=None):
     """
     Run the given subprocess command and return its output. Raise an Exception
-    if an error occurs.
+    if an error occurs. Note that an empty or non-existent command name will not
+    raise an exception.
 
     :param command: The command to run. Using a list of strings is recommended. The command
                     will be run in a subprocess without using a shell, as such shell features like
@@ -41,7 +40,7 @@ def get_subprocess_output(command, log, raise_on_empty_output=True, log_debug=Tr
     """
 
     cmd_args = []
-    if isinstance(command, string_types):
+    if isinstance(command, str):
         for arg in command.split():
             cmd_args.append(arg)
     elif hasattr(type(command), '__iter__'):

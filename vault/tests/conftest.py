@@ -7,7 +7,6 @@ import time
 
 import pytest
 import requests
-from six import PY2
 
 from datadog_checks.dev import LazyFunction, TempDir, docker_run, run_command
 from datadog_checks.dev.ci import running_on_ci
@@ -21,9 +20,6 @@ from .common import COMPOSE_FILE, HEALTH_ENDPOINT, INSTANCES, VAULT_VERSION, get
 
 @pytest.fixture
 def use_openmetrics(request):
-    if request.param and PY2:
-        pytest.skip('This version of the integration is only available when using Python 3.')
-
     return request.param
 
 
@@ -41,9 +37,15 @@ def global_tags():
 
 @pytest.fixture(scope='session')
 def instance(dd_get_state):
-    def get_instance():
+    def get_instance(use_auth_file=True):
         inst = INSTANCES['main'].copy()
-        inst['client_token_path'] = dd_get_state('client_token_path')
+
+        if use_auth_file:
+            inst['client_token_path'] = dd_get_state('client_token_path')
+        else:
+            with open(dd_get_state('client_token_path'), 'r') as auth_file:
+                inst['client_token'] = auth_file.read()
+
         return inst
 
     return get_instance
@@ -57,10 +59,18 @@ def no_token_instance():
 
 
 @pytest.fixture(scope='session')
-def e2e_instance():
-    inst = INSTANCES['main'].copy()
-    inst['client_token_path'] = '/home/vault-sink/token'
-    return inst
+def e2e_instance(dd_get_state):
+    def get_instance(use_auth_file=True):
+        inst = INSTANCES['main'].copy()
+
+        if use_auth_file:
+            inst['client_token_path'] = '/home/vault-sink/token'
+        else:
+            with open(dd_get_state('client_token_path'), 'r') as auth_file:
+                inst['client_token'] = auth_file.read()
+        return inst
+
+    return get_instance
 
 
 @pytest.fixture(scope='session')
@@ -87,7 +97,7 @@ def dd_environment(e2e_instance, dd_save_state):
         ):
             dd_save_state('client_token_path', token_file)
 
-            yield e2e_instance, {'docker_volumes': ['{}:/home/vault-sink'.format(sink_dir)]}
+            yield e2e_instance(), {'docker_volumes': ['{}:/home/vault-sink'.format(sink_dir)]}
 
 
 class ApplyPermissions(LazyFunction):

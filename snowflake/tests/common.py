@@ -17,7 +17,9 @@ INSTANCE = {
     'role': 'ACCOUNTADMIN',
     'disable_generic_tags': True,
     'login_timeout': 3,
+    'aggregate_last_24_hours': True,
 }
+
 OAUTH_INSTANCE = {
     'username': 'testuser',
     'account': 'test_acct.us-central1.gcp',

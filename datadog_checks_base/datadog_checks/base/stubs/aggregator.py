@@ -8,8 +8,6 @@ import os
 import re
 from collections import OrderedDict, defaultdict
 
-from six import iteritems
-
 from ..constants import ServiceCheck
 from ..utils.common import ensure_unicode, to_native_string
 from .common import HistogramBucketStub, MetricStub, ServiceCheckStub
@@ -79,7 +77,7 @@ class AggregatorStub(object):
             ('historate', 6),
         )
     )
-    METRIC_ENUM_MAP_REV = {v: k for k, v in iteritems(METRIC_ENUM_MAP)}
+    METRIC_ENUM_MAP_REV = {v: k for k, v in METRIC_ENUM_MAP.items()}
     GAUGE, RATE, COUNT, MONOTONIC_COUNT, COUNTER, HISTOGRAM, HISTORATE = list(METRIC_ENUM_MAP.values())
     AGGREGATE_TYPES = {COUNT, COUNTER}
     IGNORED_METRICS = {'datadog.agent.profile.memory.check_run_alloc'}
@@ -212,6 +210,10 @@ class AggregatorStub(object):
             for stub in self._histogram_buckets.get(to_native_string(name), [])
         ]
 
+    def assert_metric_has_tags(self, metric_name, tags, count=None, at_least=1):
+        for tag in tags:
+            self.assert_metric_has_tag(metric_name, tag, count, at_least)
+
     def assert_metric_has_tag(self, metric_name, tag, count=None, at_least=1):
         """
         Assert a metric is tagged with tag
@@ -229,12 +231,14 @@ class AggregatorStub(object):
             msg = "The metric '{}' with tag '{}' was only found {}/{} times".format(metric_name, tag, count, at_least)
         elif candidates:
             msg = (
-                "The metric '{}' was found but not with the tag '{}'.\n"
+                "The metric '{}' was found but not with the tag '{}'.\n".format(metric_name, tag)
                 + "Similar submitted:\n"
                 + "\n".join(["     {}".format(m) for m in candidates])
             )
         else:
+            expected_stub = MetricStub(metric_name, type=None, value=None, tags=[tag], hostname=None, device=None)
             msg = "Metric '{}' not found".format(metric_name)
+            msg = "{}\n{}".format(msg, build_similar_elements_msg(expected_stub, self._metrics))
 
         if count is not None:
             assert len(candidates_with_tag) == count, msg
@@ -250,7 +254,7 @@ class AggregatorStub(object):
                 continue
             if tags and set(tags) != set(e['tags']):
                 continue
-            for name, value in iteritems(kwargs):
+            for name, value in kwargs.items():
                 if e[name] != value:
                     break
             else:
@@ -438,7 +442,7 @@ class AggregatorStub(object):
 
         exclude = exclude or []
         errors = set()
-        for metric_name, metric_stubs in iteritems(self._metrics):
+        for metric_name, metric_stubs in self._metrics.items():
             if metric_name in exclude:
                 continue
             for metric_stub in metric_stubs:
@@ -473,6 +477,42 @@ class AggregatorStub(object):
                         )
 
         assert not errors, "Metadata assertion errors using metadata.csv:" + "\n\t- ".join([''] + sorted(errors))
+
+    def assert_service_checks(self, service_checks):
+        """
+        Assert service checks using service_checks.json
+
+        Usage:
+
+            from datadog_checks.dev.utils import get_service_checks
+            aggregator.assert_service_checks(get_service_checks())
+
+        """
+
+        errors = set()
+
+        for service_check_name, service_check_stubs in self._service_checks.items():
+            for service_check_stub in service_check_stubs:
+                # Checking the metric is in `service_checks.json`
+                if service_check_name not in [sc['check'] for sc in service_checks]:
+                    errors.add("Expect `{}` to be in service_check.json.".format(service_check_name))
+                    continue
+
+                status_string = {value: key for key, value in ServiceCheck._asdict().items()}[
+                    service_check_stub.status
+                ].lower()
+                service_check = [c for c in service_checks if c['check'] == service_check_name][0]
+
+                if status_string not in service_check['statuses']:
+                    errors.add(
+                        "Expect `{}` value to be in service_check.json for service check {}.".format(
+                            status_string, service_check_stub.name
+                        )
+                    )
+
+        assert not errors, "Service checks assertion errors using service_checks.json:" + "\n\t- ".join(
+            [''] + sorted(errors)
+        )
 
     def assert_no_duplicate_all(self):
         """
@@ -526,7 +566,7 @@ class AggregatorStub(object):
             all_contexts[context].append(metric)
 
         dup_contexts = defaultdict(list)
-        for context, metrics in iteritems(all_contexts):
+        for context, metrics in all_contexts.items():
             if len(metrics) > 1:
                 dup_contexts[context] = metrics
 

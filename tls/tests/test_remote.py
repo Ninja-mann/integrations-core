@@ -3,7 +3,6 @@
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import mock
 import pytest
-from six import PY2
 
 from datadog_checks.base import ConfigurationError
 from datadog_checks.tls.const import (
@@ -14,6 +13,11 @@ from datadog_checks.tls.const import (
 )
 from datadog_checks.tls.tls import TLSCheck
 from datadog_checks.tls.tls_remote import TLSRemoteCheck
+
+try:
+    from unittest.mock import MagicMock, patch
+except ImportError:  # Python 2
+    from mock import MagicMock, patch
 
 
 def test_right_class_is_instantiated(instance_remote_no_server):
@@ -134,20 +138,6 @@ def test_no_connect_ipv6(aggregator, instance_remote_no_connect):
     aggregator.assert_all_metrics_covered()
 
 
-def test_version_default_1_1(aggregator, instance_remote_version_default_1_1):
-    c = TLSCheck('tls', {}, [instance_remote_version_default_1_1])
-    c.check(None)
-
-    aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
-    aggregator.assert_service_check(SERVICE_CHECK_VERSION, status=c.CRITICAL, tags=c._tags, count=1)
-    aggregator.assert_service_check(SERVICE_CHECK_VALIDATION, status=c.OK, tags=c._tags, count=1)
-    aggregator.assert_service_check(SERVICE_CHECK_EXPIRATION, status=c.OK, tags=c._tags, count=1)
-
-    aggregator.assert_metric('tls.days_left', count=1)
-    aggregator.assert_metric('tls.seconds_left', count=1)
-    aggregator.assert_all_metrics_covered()
-
-
 def test_version_default_1_2(aggregator, instance_remote_version_default_1_2):
     c = TLSCheck('tls', {}, [instance_remote_version_default_1_2])
     c.check(None)
@@ -176,8 +166,8 @@ def test_version_default_1_3(aggregator, instance_remote_version_default_1_3):
     aggregator.assert_all_metrics_covered()
 
 
-def test_version_init_config_default(aggregator, instance_remote_version_default_1_1):
-    c = TLSCheck('tls', {'allowed_versions': ['1.1']}, [instance_remote_version_default_1_1])
+def test_version_init_config_default(aggregator, instance_remote_version_default_1_2):
+    c = TLSCheck('tls', {'allowed_versions': ['1.2']}, [instance_remote_version_default_1_2])
     c.check(None)
 
     aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
@@ -224,18 +214,15 @@ def test_cert_expired(aggregator, instance_remote_cert_expired):
 
     aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
     aggregator.assert_service_check(SERVICE_CHECK_VALIDATION, status=c.CRITICAL, tags=c._tags, count=1)
-    if PY2:
-        aggregator.assert_service_check(SERVICE_CHECK_VERSION, count=0)
-        aggregator.assert_service_check(SERVICE_CHECK_EXPIRATION, count=0)
-    else:
-        aggregator.assert_service_check(SERVICE_CHECK_VERSION, count=0)
-        aggregator.assert_service_check(
-            SERVICE_CHECK_EXPIRATION, status=c.CRITICAL, tags=c._tags, message='Certificate has expired', count=1
-        )
+    aggregator.assert_service_check(SERVICE_CHECK_VERSION, count=0)
+    aggregator.assert_service_check(
+        SERVICE_CHECK_EXPIRATION, status=c.CRITICAL, tags=c._tags, message='Certificate has expired', count=1
+    )
 
     aggregator.assert_all_metrics_covered()
 
 
+@pytest.mark.skip(reason="expired certified, reactivate test when certified valid again")
 def test_fetch_intermediate_certs(aggregator, instance_remote_fetch_intermediate_certs):
     c = TLSCheck('tls', {}, [instance_remote_fetch_intermediate_certs])
     c.check(None)
@@ -319,4 +306,117 @@ def test_cert_warning_seconds(aggregator, instance_remote_cert_warning_seconds):
 
     aggregator.assert_metric('tls.days_left', count=1)
     aggregator.assert_metric('tls.seconds_left', count=1)
+    aggregator.assert_all_metrics_covered()
+
+
+def test_postgres_ok(aggregator, instance_remote_postgresql_valid):
+    c = TLSCheck('tls', {}, [instance_remote_postgresql_valid])
+    c.check(None)
+
+    aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_VERSION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_VALIDATION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_EXPIRATION, status=c.OK, tags=c._tags, count=1)
+
+    aggregator.assert_metric('tls.days_left', count=1)
+    aggregator.assert_metric('tls.seconds_left', count=1)
+    aggregator.assert_all_metrics_covered()
+
+
+def test_mysql_ok(aggregator, instance_remote_mysql_valid):
+    c = TLSCheck('tls', {}, [instance_remote_mysql_valid])
+    c.check(None)
+
+    aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_VERSION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_VALIDATION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_EXPIRATION, status=c.OK, tags=c._tags, count=1)
+
+    aggregator.assert_metric('tls.days_left', count=1)
+    aggregator.assert_metric('tls.seconds_left', count=1)
+    aggregator.assert_all_metrics_covered()
+
+
+def test_valid_version_with_critical_certificate_validation_and_critial_certificate_expiration(
+    aggregator, instance_remote_ok
+):
+    from ssl import SSLCertVerificationError
+
+    c = TLSCheck('tls', {}, [instance_remote_ok])
+    check = TLSRemoteCheck(agent_check=c)
+    with patch.object(check.agent_check, 'get_tls_context') as mock_get_tls_context:
+        mock_tls_context = MagicMock()
+        mock_get_tls_context.return_value = mock_tls_context
+
+        with patch.object(mock_tls_context, 'wrap_socket') as mock_wrap_socket:
+            mock_wrap_socket.return_value.__enter__.return_value.version.return_value = 'TLSv1.2'
+            ssl_exception = SSLCertVerificationError()
+            ssl_exception.verify_code = 10
+            ssl_exception.verify_message = 'Test exception with error code 10'
+            mock_wrap_socket.return_value.__enter__.return_value.getpeercert.side_effect = ssl_exception
+            c.check(None)
+
+    aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(
+        SERVICE_CHECK_VALIDATION, status=c.CRITICAL, tags=c._tags, count=1, message='Test exception with error code 10'
+    )
+    aggregator.assert_service_check(SERVICE_CHECK_VERSION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(
+        SERVICE_CHECK_EXPIRATION, status=c.CRITICAL, tags=c._tags, message='Certificate has expired', count=1
+    )
+
+    aggregator.assert_all_metrics_covered()
+
+
+def test_valid_version_and_critical_certificate_validation_due_to_socket_exception(aggregator, instance_remote_ok):
+    c = TLSCheck('tls', {}, [instance_remote_ok])
+    check = TLSRemoteCheck(agent_check=c)
+    with patch.object(check.agent_check, 'get_tls_context') as mock_get_tls_context:
+        mock_tls_context = MagicMock()
+        mock_get_tls_context.return_value = mock_tls_context
+
+        with patch.object(mock_tls_context, 'wrap_socket') as mock_wrap_socket:
+            mock_wrap_socket.return_value.__enter__.return_value.version.return_value = 'TLSv1.2'
+            mock_wrap_socket.return_value.__enter__.return_value.getpeercert.side_effect = Exception(
+                'Exception with secure_sock.getpeercert(binary_form=True)'
+            )
+            c.check(None)
+
+    aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(
+        SERVICE_CHECK_VALIDATION,
+        status=c.CRITICAL,
+        tags=c._tags,
+        count=1,
+        message='Exception with secure_sock.getpeercert(binary_form=True)',
+    )
+    aggregator.assert_service_check(SERVICE_CHECK_VERSION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_EXPIRATION, count=0)
+
+    aggregator.assert_all_metrics_covered()
+
+
+def test_valid_version_and_critical_certificate_validation_due_to_parsing_error(aggregator, instance_remote_ok):
+    c = TLSCheck('tls', {}, [instance_remote_ok])
+    check = TLSRemoteCheck(agent_check=c)
+    with patch.object(check.agent_check, 'get_tls_context') as mock_get_tls_context:
+        mock_tls_context = MagicMock()
+        mock_get_tls_context.return_value = mock_tls_context
+
+        with patch.object(mock_tls_context, 'wrap_socket') as mock_wrap_socket:
+            mock_wrap_socket.return_value.__enter__.return_value.version.return_value = 'TLSv1.2'
+            mock_wrap_socket.return_value.getpeercert.side_effect = Exception('Test exception')
+            c.check(None)
+
+    aggregator.assert_service_check(SERVICE_CHECK_CAN_CONNECT, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(
+        SERVICE_CHECK_VALIDATION,
+        status=c.CRITICAL,
+        tags=c._tags,
+        count=1,
+        message="Unable to parse the certificate: argument 'data': 'MagicMock' object cannot be converted to 'PyBytes'",
+    )
+    aggregator.assert_service_check(SERVICE_CHECK_VERSION, status=c.OK, tags=c._tags, count=1)
+    aggregator.assert_service_check(SERVICE_CHECK_EXPIRATION, count=0)
+
     aggregator.assert_all_metrics_covered()

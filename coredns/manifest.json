@@ -1,43 +1,76 @@
 {
-  "maintainer": "help@datadoghq.com",
-  "manifest_version": "1.0.0",
-  "name": "coredns",
-  "metric_prefix": "coredns.",
-  "metric_to_check": "coredns.request_count",
-  "display_name": "CoreDNS",
-  "short_description": "CoreDNS collects DNS metrics in Kubernetes.",
-  "support": "core",
-  "supported_os": [
-    "linux"
-  ],
-  "guid": "9b316155-fc8e-4cb0-8bd5-8af270759cfb",
-  "public_title": "CoreDNS Integration",
-  "categories": [
-    "containers",
-    "network",
-    "autodiscovery",
-    "log collection"
-  ],
-  "type": "check",
-  "aliases": [],
-  "is_public": true,
-  "creates_events": false,
-  "integration_id": "coredns",
+  "manifest_version": "2.0.0",
+  "app_uuid": "b613759e-89ca-4d98-a2c1-4d465c42e413",
+  "app_id": "coredns",
+  "display_on_public_website": true,
+  "tile": {
+    "overview": "README.md#Overview",
+    "configuration": "README.md#Setup",
+    "support": "README.md#Support",
+    "changelog": "CHANGELOG.md",
+    "description": "CoreDNS collects DNS metrics in Kubernetes.",
+    "title": "CoreDNS",
+    "media": [],
+    "classifier_tags": [
+      "Category::Caching",
+      "Category::Containers",
+      "Category::Kubernetes",
+      "Category::Log Collection",
+      "Category::Network",
+      "Supported OS::Linux",
+      "Offering::Integration"
+    ],
+    "resources": [
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/coredns-metrics/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/coredns-monitoring-tools/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/monitoring-coredns-with-datadog/"
+      }
+    ]
+  },
+  "author": {
+    "support_email": "help@datadoghq.com",
+    "name": "Datadog",
+    "homepage": "https://www.datadoghq.com",
+    "sales_email": "info@datadoghq.com"
+  },
   "assets": {
-    "configuration": {
-      "spec": "assets/configuration/spec.yaml"
-    },
-    "monitors": {
-      "[CoreDNS] Cache hits count low": "assets/monitors/coredns_cache_hits_low.json",
-      "[CoreDNS] Request duration high": "assets/monitors/coredns_request_duration_high.json"
+    "integration": {
+      "source_type_name": "CoreDNS",
+      "configuration": {
+        "spec": "assets/configuration/spec.yaml"
+      },
+      "events": {
+        "creates_events": false
+      },
+      "metrics": {
+        "prefix": "coredns.",
+        "check": "coredns.request_count",
+        "metadata_path": "metadata.csv"
+      },
+      "service_checks": {
+        "metadata_path": "assets/service_checks.json"
+      },
+      "process_signatures": [
+        "coredns"
+      ],
+      "source_type_id": 10038,
+      "auto_install": true
     },
     "dashboards": {
-      "CoreDNS": "assets/dashboards/coredns.json"
+      "CoreDNS": "assets/dashboards/coredns.json",
+      "CoreDNS [V2]": "assets/dashboards/coredns_v2.json"
     },
-    "service_checks": "assets/service_checks.json",
-    "logs": {
-      "source": "coredns"
-    },
-    "metrics_metadata": "metadata.csv"
+    "monitors": {
+      "Cache hits count is low": "assets/monitors/coredns_cache_hits_low.json",
+      "Request duration is high": "assets/monitors/coredns_request_duration_high.json"
+    }
   }
 }

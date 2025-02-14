@@ -1,45 +1,81 @@
 {
-  "display_name": "Databricks",
-  "maintainer": "help@datadoghq.com",
-  "manifest_version": "1.0.0",
-  "name": "databricks",
-  "metric_prefix": "databricks.",
-  "metric_to_check": "",
-  "creates_events": false,
-  "short_description": "Monitor Apache Spark in Databricks clusters.",
-  "guid": "3e1c7918-f224-46c6-836f-1169857e2564",
-  "support": "core",
-  "supported_os": [
-    "linux",
-    "mac_os",
-    "windows"
-  ],
-  "public_title": "Databricks",
-  "categories": [
-    "cloud",
-    "collaboration",
-    "processing",
-    "log collection"
-  ],
-  "type": "check",
-  "is_public": true,
-  "integration_id": "databricks",
+  "manifest_version": "2.0.0",
+  "app_uuid": "f99b6e79-f50a-479d-b916-955a577e4f41",
+  "app_id": "databricks",
+  "display_on_public_website": true,
+  "tile": {
+    "overview": "README.md#Overview",
+    "configuration": "README.md#Setup",
+    "support": "README.md#Support",
+    "changelog": "CHANGELOG.md",
+    "description": "Monitor the reliability and cost of your Databricks environment.",
+    "title": "Databricks",
+    "media": [],
+    "classifier_tags": [
+      "Category::Cloud",
+      "Category::Cost Management",
+      "Category::Log Collection",
+      "Supported OS::Linux",
+      "Supported OS::Windows",
+      "Supported OS::macOS",
+      "Offering::Integration"
+    ],
+    "resources": [
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/data-jobs-monitoring/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/data-observability-monitoring/"
+      },
+      {
+        "resource_type": "blog",
+        "url": "https://www.datadoghq.com/blog/databricks-monitoring-datadog/"
+      }
+    ]
+  },
+  "author": {
+    "support_email": "help@datadoghq.com",
+    "name": "Datadog",
+    "homepage": "https://www.datadoghq.com",
+    "sales_email": "info@datadoghq.com"
+  },
   "assets": {
-    "dashboards": {
-      "Databricks Spark Overview": "assets/dashboards/databricks_overview.json"
+    "integration": {
+      "source_type_name": "Databricks",
+      "configuration": {},
+      "events": {
+        "creates_events": false
+      },
+      "metrics": {
+        "prefix": "databricks.model_serving.",
+        "check": "databricks.model_serving.provisioned_concurrent_requests_total",
+        "metadata_path": "metadata.csv"
+      },
+      "service_checks": {
+        "metadata_path": "assets/service_checks.json"
+      },
+      "source_type_id": 10152,
+      "auto_install": true
     },
-    "saved_views": {},
-    "monitors": {},
-    "service_checks": "assets/service_checks.json",
+    "dashboards": {
+      "Databricks Overview Dashboard": "assets/dashboards/overview_dashboard.json",
+      "Databricks Clusters Dashboard": "assets/dashboards/clusters_dashboard.json",
+      "databricks_cost_overview": "assets/dashboards/databricks_cost_overview.json",
+      "Databricks Model Serving Overview": "assets/dashboards/model_serving_overview.json"
+    },
+    "monitors": {
+      "Databricks Model Serving: High count 4xx errors": "assets/monitors/4xx_errors.json",
+      "Databricks Model Serving: High count 5xx errors": "assets/monitors/5xx_errors.json",
+      "Databricks Model Serving: High CPU usage": "assets/monitors/cpu_usage_high.json",
+      "Databricks Model Serving: High CPU memory usage": "assets/monitors/cpu_memory_usage_high.json",
+      "Databricks Model Serving: High GPU usage": "assets/monitors/gpu_usage_high.json",
+      "Databricks Model Serving: High GPU memory usage": "assets/monitors/gpu_memory_usage_high.json",
+      "Databricks Model Serving: High request latency": "assets/monitors/request_latency_high.json"
+    },
     "logs": {
       "source": "spark"
-    },
-    "metrics_metadata": "metadata.csv"
-  },
-  "further_reading": [
-    {"link": "https://www.datadoghq.com/blog/databricks-monitoring-datadog/",
-      "tag": "Blog",
-      "text": "Monitor Databricks with Datadog"
     }
-  ]
+  }
 }

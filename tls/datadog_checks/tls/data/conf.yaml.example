@@ -23,7 +23,7 @@ init_config:
     #
     # service: <SERVICE>
 
-## Every instance is scheduled independent of the others.
+## Every instance is scheduled independently of the others.
 #
 instances:
 
@@ -127,6 +127,16 @@ instances:
     #
     # name: <NAME>
 
+    ## @param start_tls - string - optional
+    ## Send protocol-specific message(s) to switch to TLS for communication.
+    ## StartTLS is implemented on these protocols: smtp, pop3, imap, ftp, xmpp, xmpp-server,
+    ## irc, postgres, mysql, lmtp, nntp, sieve, and ldap.
+    ##
+    ## Currently this checks supports only the below protocols:
+    ##   postgres, mysql
+    #
+    # start_tls: <START_TLS>
+
     ## @param tags - list of strings - optional
     ## A list of tags to attach to every metric and service check emitted by this instance.
     ##
@@ -210,3 +220,13 @@ instances:
     ## Verifies that the server's cert hostname matches the one requested.
     #
     # tls_validate_hostname: true
+
+    ## @param tls_ciphers - list of strings - optional
+    ## The list of ciphers suites to use when connecting to an endpoint. If not specified, 
+    ## `ALL` ciphers are used. For list of ciphers see: 
+    ## https://www.openssl.org/docs/man1.0.2/man1/ciphers.html
+    #
+    # tls_ciphers:
+    #   - TLS_AES_256_GCM_SHA384
+    #   - TLS_CHACHA20_POLY1305_SHA256
+    #   - TLS_AES_128_GCM_SHA256

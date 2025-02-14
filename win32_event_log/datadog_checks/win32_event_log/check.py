@@ -8,19 +8,15 @@ import win32con
 import win32event
 import win32evtlog
 import win32security
-from six import PY2
 
 from datadog_checks.base import AgentCheck, ConfigurationError, is_affirmative
+from datadog_checks.base.errors import SkipInstanceError
 from datadog_checks.base.utils.common import exclude_undefined_keys
 from datadog_checks.base.utils.time import get_timestamp
 
+from .config_models import ConfigMixin
 from .filters import construct_xpath_query
 from .legacy import Win32EventLogWMI
-
-if PY2:
-    ConfigMixin = object
-else:
-    from .config_models import ConfigMixin
 
 
 class Win32EventLogCheck(AgentCheck, ConfigMixin):
@@ -58,6 +54,8 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
         'event_format',
     )
 
+    NEW_PARAMS = ('dd_security_events',)
+
     # https://docs.microsoft.com/en-us/windows/win32/wes/eventmanifestschema-leveltype-complextype#remarks
     #
     # From
@@ -69,10 +67,32 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
     def __new__(cls, name, init_config, instances):
         instance = instances[0]
 
-        if PY2 or is_affirmative(instance.get('legacy_mode', True)):
+        init_config_legacy_mode = init_config.get('legacy_mode', None)
+        init_config_legacy_mode_v2 = init_config.get('legacy_mode_v2', None)
+        # If legacy_mode is unset for an instance, default to the init_config option
+        use_legacy_mode = instance.get('legacy_mode', init_config_legacy_mode)
+        use_legacy_mode_v2 = instance.get('legacy_mode_v2', init_config_legacy_mode_v2)
+
+        # If legacy_mode and legacy_mode_v2 are unset, default to legacy mode for configuration backwards compatibility
+        if use_legacy_mode is None and not is_affirmative(use_legacy_mode_v2):
+            use_legacy_mode = True
+
+        use_legacy_mode = is_affirmative(use_legacy_mode)
+        use_legacy_mode_v2 = is_affirmative(use_legacy_mode_v2)
+
+        if use_legacy_mode and use_legacy_mode_v2:
+            raise ConfigurationError(
+                "legacy_mode and legacy_mode_v2 are both true. Each instance must set a single mode to true."
+            )
+
+        if use_legacy_mode:
             return Win32EventLogWMI(name, init_config, instances)
-        else:
+        elif use_legacy_mode_v2:
             return super(Win32EventLogCheck, cls).__new__(cls)
+        else:
+            raise SkipInstanceError(
+                "Set the legacy_mode and legacy_mode_v2 options to configure the implementation to use."
+            )
 
     def __init__(self, name, init_config, instances):
         super(Win32EventLogCheck, self).__init__(name, init_config, instances)
@@ -110,7 +130,7 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
         self.check_initializations.append(self.parse_config)
         self.check_initializations.append(self.construct_query)
         self.check_initializations.append(self.create_session)
-        self.check_initializations.append(self.create_subscription)
+        self.check_initializations.append(self.init_subscription)
 
         # Define every property collector
         self._collectors = [self.collect_timestamp, self.collect_fqdn, self.collect_level, self.collect_provider]
@@ -127,6 +147,10 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
                     "%s config option is ignored unless running legacy mode. Please remove it", legacy_param
                 )
 
+        for new_param in self.NEW_PARAMS:
+            if new_param in self.instance:
+                self.warning("%s config option is ignored when running legacy_mode_v2. Please remove it", new_param)
+
     def check(self, _):
         for event in self.consume_events():
             try:
@@ -139,7 +163,7 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
             event_payload = {
                 'source_type_name': self.SOURCE_TYPE_NAME,
                 'priority': self._event_priority,
-                'tags': list(self.config.tags),
+                'tags': list(self.config.tags) if self.config.tags is not None else [],
             }
 
             # As seen in every collector, before using members of the enum you need to check for existence. See:
@@ -279,21 +303,27 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
 
     def poll_events(self):
         while True:
-
             # IMPORTANT: the subscription starts immediately so you must consume before waiting for the first signal
             while True:
                 # https://docs.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtnext
                 # https://mhammond.github.io/pywin32/win32evtlog__EvtNext_meth.html
                 #
-                # An error saying EvtNext: The operation identifier is not valid happens
-                # when you call the method and there are no events to read (i.e. polling).
-                # There is an unreleased upstream contribution to return
-                # an empty tuple instead https://github.com/mhammond/pywin32/pull/1648
-                # For the moment is logged as a debug line.
+                # Behavior when you call the EvtNext and there are no events to read (i.e. polling).
+                # Python 2: An error saying EvtNext: The operation identifier is not valid happens.
+                #           This is logged as a debug line.
+                # Python 3: Returns an empty tuple
                 try:
                     events = win32evtlog.EvtNext(self._subscription, self.config.payload_size)
                 except pywintypes.error as e:
                     self.log_windows_error(e)
+                    if (
+                        e.winerror == 15007  # ERROR_EVT_CHANNEL_NOT_FOUND: The specified channel could not be found.
+                        or e.winerror == 6  # ERROR_INVALID_HANDLE_VALUE: The handle is invalid
+                    ):
+                        # Can happen if the event publisher is unregistered,
+                        # which sometimes happens during software updates.
+                        # Must get a new subscription handle.
+                        self.reset_subscription()
                     break
                 else:
                     if not events:
@@ -358,7 +388,7 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
         # https://mhammond.github.io/pywin32/win32evtlog__EvtOpenSession_meth.html
         self._session = win32evtlog.EvtOpenSession(session_struct, win32evtlog.EvtRpcLogin, 0, 0)
 
-    def create_subscription(self):
+    def init_subscription(self):
         # https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventa
         # https://mhammond.github.io/pywin32/win32event__CreateEvent_meth.html
         self._event_handle = win32event.CreateEvent(None, 0, 0, self.check_id)
@@ -376,6 +406,14 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
         # https://mhammond.github.io/pywin32/win32evtlog__EvtCreateBookmark_meth.html
         self._bookmark_handle = win32evtlog.EvtCreateBookmark(bookmark)
 
+        self.create_subscription(flags, bookmark)
+
+        # https://docs.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtcreaterendercontext
+        # https://docs.microsoft.com/en-us/windows/win32/api/winevt/ne-winevt-evt_render_context_flags
+        self._render_context_system = win32evtlog.EvtCreateRenderContext(win32evtlog.EvtRenderContextSystem)
+        self._render_context_data = win32evtlog.EvtCreateRenderContext(win32evtlog.EvtRenderContextUser)
+
+    def create_subscription(self, flags, bookmark):
         # https://docs.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtsubscribe
         # https://mhammond.github.io/pywin32/win32evtlog__EvtSubscribe_meth.html
         self._subscription = win32evtlog.EvtSubscribe(
@@ -387,10 +425,12 @@ class Win32EventLogCheck(AgentCheck, ConfigMixin):
             Bookmark=self._bookmark_handle if bookmark else None,
         )
 
-        # https://docs.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtcreaterendercontext
-        # https://docs.microsoft.com/en-us/windows/win32/api/winevt/ne-winevt-evt_render_context_flags
-        self._render_context_system = win32evtlog.EvtCreateRenderContext(win32evtlog.EvtRenderContextSystem)
-        self._render_context_data = win32evtlog.EvtCreateRenderContext(win32evtlog.EvtRenderContextUser)
+    def reset_subscription(self):
+        # Destroy old subscription
+        # Important so that it doesn't affect event or bookmark handle states.
+        self._subscription = None
+        # Create new subscription
+        self.create_subscription(win32evtlog.EvtSubscribeStartAfterBookmark, True)
 
     def get_session_struct(self):
         server = self.instance.get('server', 'localhost')

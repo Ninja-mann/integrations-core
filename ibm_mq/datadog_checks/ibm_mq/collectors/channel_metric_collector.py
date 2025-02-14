@@ -1,15 +1,13 @@
 # (C) Datadog, Inc. 2020-present
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
-from typing import Callable, Dict, List
-
-from six import iteritems
+from typing import Callable, Dict, List  # noqa: F401
 
 from datadog_checks.base import AgentCheck, to_string
-from datadog_checks.base.log import CheckLoggingAdapter
+from datadog_checks.base.log import CheckLoggingAdapter  # noqa: F401
 
 from .. import metrics
-from ..config import IBMMQConfig
+from ..config import IBMMQConfig  # noqa: F401
 
 try:
     import pymqi
@@ -76,7 +74,7 @@ class ChannelMetricCollector(object):
 
         # Grab all the discoverable channels
         if self.config.auto_discover_channels:
-            self._submit_channel_status(queue_manager, '*', self.config.tags_no_channel)
+            self._submit_channel_status(queue_manager, '*', self.config.tags_no_channel, self.config.channels)
 
     def _discover_channels(self, queue_manager):
         """Discover all channels"""
@@ -123,17 +121,29 @@ class ChannelMetricCollector(object):
         except pymqi.MQMIError as e:
             if e.comp == pymqi.CMQC.MQCC_FAILED and e.reason == pymqi.CMQCFC.MQRCCF_CHL_STATUS_NOT_FOUND:
                 self.service_check(
-                    self.CHANNEL_SERVICE_CHECK, AgentCheck.CRITICAL, search_channel_tags, hostname=self.config.hostname
+                    self.CHANNEL_SERVICE_CHECK,
+                    AgentCheck.CRITICAL,
+                    search_channel_tags,
+                    message=str(e),
+                    hostname=self.config.hostname,
                 )
                 self.log.debug("Channel status not found for channel %s: %s", search_channel_name, e)
             elif e.comp == pymqi.CMQC.MQCC_FAILED and e.reason == pymqi.CMQC.MQRC_NO_MSG_AVAILABLE:
                 self.service_check(
-                    self.CHANNEL_SERVICE_CHECK, AgentCheck.UNKNOWN, search_channel_tags, hostname=self.config.hostname
+                    self.CHANNEL_SERVICE_CHECK,
+                    AgentCheck.UNKNOWN,
+                    search_channel_tags,
+                    message=str(e),
+                    hostname=self.config.hostname,
                 )
                 self.log.debug("There are no messages available for channel %s", search_channel_name)
             else:
                 self.service_check(
-                    self.CHANNEL_SERVICE_CHECK, AgentCheck.CRITICAL, search_channel_tags, hostname=self.config.hostname
+                    self.CHANNEL_SERVICE_CHECK,
+                    AgentCheck.CRITICAL,
+                    search_channel_tags,
+                    message=str(e),
+                    hostname=self.config.hostname,
                 )
                 self.log.warning("Error getting CHANNEL status for channel %s: %s", search_channel_name, e)
         else:
@@ -156,7 +166,7 @@ class ChannelMetricCollector(object):
 
     def _submit_metrics_from_properties(self, channel_info, channel_name, metrics_map, tags):
         # type: (Dict, str, Dict[str, int], List[str] ) -> None
-        for metric_name, pymqi_type in iteritems(metrics_map):
+        for metric_name, pymqi_type in metrics_map.items():
             metric_full_name = '{}.channel.{}'.format(metrics.METRIC_PREFIX, metric_name)
             if pymqi_type not in channel_info:
                 self.log.debug("metric '%s' not found in channel: %s", metric_name, channel_name)
@@ -169,7 +179,7 @@ class ChannelMetricCollector(object):
             self.log.warning("Status `%s` not found for channel `%s`", channel_status, channel_name)
             channel_status = STATUS_MQCHS_UNKNOWN
 
-        for status, status_label in iteritems(CHANNEL_STATUS_NAME_MAPPING):
+        for status, status_label in CHANNEL_STATUS_NAME_MAPPING.items():
             status_active = int(status == channel_status)
             self.gauge(
                 self.CHANNEL_COUNT_CHECK,

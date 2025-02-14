@@ -4,24 +4,19 @@
 import logging
 import sys
 import warnings
-from typing import Callable
+from typing import Callable  # noqa: F401
 
-from six import PY2, text_type
 from urllib3.exceptions import InsecureRequestWarning
 
+from datadog_checks.base.agent import datadog_agent
+
 from .utils.common import to_native_string
-
-try:
-    import datadog_agent
-except ImportError:
-    from .stubs import datadog_agent
-
+from .utils.tracing import tracing_enabled
 
 # Arbitrary number less than 10 (DEBUG)
 TRACE_LEVEL = 7
 
 LOGGER_FRAME_SEARCH_MAX_DEPTH = 50
-
 
 DEFAULT_FALLBACK_LOGGER = logging.getLogger(__name__)
 
@@ -61,27 +56,31 @@ class CheckLoggingAdapter(logging.LoggerAdapter):
     def trace(self, msg, *args, **kwargs):
         self.log(TRACE_LEVEL, msg, *args, **kwargs)
 
-    if PY2:
-
-        def warn(self, msg, *args, **kwargs):
-            self.log(logging.WARNING, msg, *args, **kwargs)
-
-        def getEffectiveLevel(self):
-            """
-            Get the effective level for the underlying logger.
-            """
-            return self.logger.getEffectiveLevel()
-
 
 class CheckLogFormatter(logging.Formatter):
+    def __init__(self):
+        super(CheckLogFormatter, self).__init__()
+        self.integration_tracing_enabled, _ = tracing_enabled()
+
     def format(self, record):
         # type: (logging.LogRecord) -> str
         message = to_native_string(super(CheckLogFormatter, self).format(record))
-        return "{} | ({}:{}) | {}".format(
-            # Default to `-` for non-check logs
+
+        if not self.integration_tracing_enabled:
+            return "{} | ({}:{}) | {}".format(
+                # Default to `-` for non-check logs
+                getattr(record, '_check_id', '-'),
+                getattr(record, '_filename', record.filename),
+                getattr(record, '_lineno', record.lineno),
+                message,
+            )
+
+        return "{} | ({}:{}) | dd.trace_id={} dd.span_id={} | {}".format(
             getattr(record, '_check_id', '-'),
             getattr(record, '_filename', record.filename),
             getattr(record, '_lineno', record.lineno),
+            getattr(record, 'dd.trace_id', 0),
+            getattr(record, 'dd.span_id', 0),
             message,
         )
 
@@ -135,10 +134,6 @@ def _get_py_loglevel(lvl):
     """
     Map log levels to strings
     """
-    # In Python2, transform the unicode object into plain string
-    if PY2 and isinstance(lvl, text_type):
-        lvl = lvl.encode('ascii', 'ignore')
-
     # Be resilient to bad input since `lvl` comes from a configuration file
     try:
         lvl = lvl.upper()

@@ -1,0 +1,82 @@
+name: Quick check PR
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        required: true
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: "3.12"
+  CHECK_SCRIPT: "ddev/src/ddev/utils/scripts/check_pr.py"
+
+jobs:
+  check:
+    name: Check PR
+    runs-on: ubuntu-22.04
+
+    permissions:
+      pull-requests: write # For the "Comment" step, read for the "Fetch script" and "Check changelog" steps
+      contents: read # For the "Fetch diff" and "Check changelog" steps
+
+    steps:
+    # Uncomment for testing purposes
+    # - uses: actions/checkout@v4
+    #   if: inputs.repo == 'core'
+    #   with:
+    #     ref: "${{ github.event.pull_request.head.sha }}"
+
+    - name: Set up Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: "${{ env.PYTHON_VERSION }}"
+
+    - name: Fetch diff
+      env:
+        GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      # https://github.com/cli/cli/blob/v2.33.0/pkg/cmd/pr/diff/diff.go#L167
+      # https://docs.github.com/en/rest/overview/media-types?apiVersion=2022-11-28#diff-media-type-for-commits-commit-comparison-and-pull-requests
+      run: >-
+        curl
+        --header "Authorization: Bearer $GITHUB_TOKEN"
+        --header "Accept: application/vnd.github.diff"
+        -Lo /tmp/diff
+        "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}"
+
+    - name: Fetch script
+      # Uncomment for testing purposes
+      # if: inputs.repo != 'core'
+      run: |-
+        mkdir -p $(dirname ${{ env.CHECK_SCRIPT }})
+        curl -sLo ${{ env.CHECK_SCRIPT }} https://raw.githubusercontent.com/DataDog/integrations-core/master/${{ env.CHECK_SCRIPT }}
+
+    - name: Check changelog
+      run: >-
+        python ${{ env.CHECK_SCRIPT }} changelog
+        --diff-file /tmp/diff
+        --pr-file "$GITHUB_EVENT_PATH"
+        ${{ github.event.pull_request.base.repo.private && '--private' || '' }}
+        --repo "${{ inputs.repo }}"
+
+    - uses: dorny/paths-filter@v2
+      id: changes
+      with:
+        filters: |
+          major_bump_fragments:
+            - '*/changelog.d/*.changed'
+            - '*/changelog.d/*.removed'
+            - '*/changelog.d/*.major'
+
+    - name: Comment
+      if: ${{ steps.changes.outputs.major_bump_fragments == 'true' }}
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const { issue: { number: issue_number }, repo: { owner, repo }  } = context;
+          github.rest.issues.createComment({ issue_number, owner, repo, body: "The changelog type `changed` or `removed` was used in this Pull Request, so the next release will bump major version. Please make sure this is a breaking change, or use the `fixed` or `added` type instead." });

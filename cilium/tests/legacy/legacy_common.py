@@ -5,6 +5,12 @@
 AGENT_DEFAULT_METRICS = [
     'cilium.agent.api_process_time.seconds.count',
     'cilium.agent.api_process_time.seconds.sum',
+    'cilium.api_limiter.adjustment_factor',
+    'cilium.api_limiter.processed_requests.total',
+    'cilium.api_limiter.processing_duration.seconds',
+    'cilium.api_limiter.rate_limit',
+    'cilium.api_limiter.requests_in_flight',
+    'cilium.api_limiter.wait_duration.seconds',
     'cilium.agent.bootstrap.seconds.count',
     'cilium.agent.bootstrap.seconds.sum',
     'cilium.controllers.failing.count',
@@ -34,6 +40,16 @@ AGENT_DEFAULT_METRICS = [
     'cilium.triggers_policy.update_folds',
     'cilium.unreachable.health_endpoints',
     'cilium.unreachable.nodes',
+    'cilium.kvstore.quorum_errors.total',
+]
+
+AGENT_METRICS_1_14 = [
+    # E2E not updated yet to 1.14+ of Cilium
+    'cilium.cidrgroup.policies',
+    'cilium.k8s_client.rate_limiter_duration.seconds.count',
+    'cilium.k8s_client.rate_limiter_duration.seconds.sum',
+    'cilium.policy.change.total',
+    'cilium.services.events.total',
 ]
 
 ADDL_AGENT_METRICS = [
@@ -43,6 +59,11 @@ ADDL_AGENT_METRICS = [
     'cilium.subprocess.start.total',
     'cilium.process.cpu.seconds.total',
     'cilium.policy.regeneration.total',
+    'cilium.proxy.redirects',
+    'cilium.proxy.upstream_reply.seconds.count',
+    'cilium.proxy.upstream_reply.seconds.sum',
+    'cilium.proxy.datapath.update_timeout.total',
+    'cilium.policy.l7.total',
     'cilium.policy.l7_denied.total',
     'cilium.policy.l7_forwarded.total',
     'cilium.policy.l7_parse_errors.total',
@@ -55,6 +76,9 @@ ADDL_AGENT_METRICS = [
     'cilium.k8s_client.api_calls.count',
     'cilium.ipam.events.total',
     'cilium.fqdn.gc_deletions.total',
+    'cilium.fqdn.active_names',
+    'cilium.fqdn.active_ips',
+    'cilium.fqdn.alive_zombie_connections',
     'cilium.forward_bytes.total',
     'cilium.forward_count.total',
     'cilium.errors_warning.total',
@@ -68,6 +92,22 @@ ADDL_AGENT_METRICS = [
     'cilium.datapath.conntrack_gc.duration.seconds.sum',
     'cilium.datapath.conntrack_gc.entries',
     'cilium.datapath.errors.total',
+    'cilium.k8s_client.api_calls.count',
+    'cilium.identity.count',
+    'cilium.policy.count',
+    'cilium.policy.import_errors.count',
+    'cilium.bpf.map_pressure',
+    'cilium.bpf.maps.virtual_memory.max.bytes',
+    'cilium.bpf.progs.virtual_memory.max.bytes',
+    'cilium.datapath.conntrack_dump.resets.total',
+    'cilium.ipcache.errors.total',
+    'cilium.k8s_event.lag.seconds',
+    'cilium.k8s_terminating.endpoints_events.total',
+    'cilium.policy.implementation_delay.count',
+    'cilium.policy.implementation_delay.sum',
+    'cilium.endpoint.regenerations.total',
+    'cilium.kvstore.sync_queue_size',
+    'cilium.kvstore.initial_sync_completed',
 ]
 
 OPERATOR_METRICS = [
@@ -78,6 +118,19 @@ OPERATOR_METRICS = [
     'cilium.operator.process.start_time.seconds',
     'cilium.operator.process.virtual_memory.bytes',
     'cilium.operator.process.virtual_memory_max.bytes',
+]
+
+OPERATOR_METRICS_1_14 = [
+    # E2E not updated yet to 1.14+ of Cilium
+    'cilium.operator.ipam.allocation.duration.seconds.count',
+    'cilium.operator.ipam.allocation.duration.seconds.sum',
+    'cilium.operator.ipam.available_interfaces',
+    'cilium.operator.ipam.available_ips',
+    'cilium.operator.ipam.ip_release_ops',
+    'cilium.operator.ipam.needed_ips',
+    'cilium.operator.ipam.release.duration.seconds.sum',
+    'cilium.operator.ipam.release.duration.seconds.count',
+    'cilium.operator.ipam.used_ips',
 ]
 
 OPERATOR_AWS_METRICS = [
@@ -142,4 +195,14 @@ OPERATOR_AWS_METRICS = [
     'cilium.operator.ipam.resync.latency.seconds.sum',
     'cilium.operator.num_ceps_per_ces.count',
     'cilium.operator.num_ceps_per_ces.sum',
+    'cilium.operator.ipam.empty_interface_slots',
+    'cilium.operator.ipam.interface_candidates',
+    'cilium.operator.ipam.ip_allocation_ops',
+]
+
+OPERATOR_AZURE_METRICS = [
+    'cilium.operator.azure.api.duration.seconds.count',
+    'cilium.operator.azure.api.duration.seconds.sum',
+    'cilium.operator.azure.api.rate_limit.duration.seconds.count',
+    'cilium.operator.azure.api.rate_limit.duration.seconds.sum',
 ]

@@ -5,9 +5,9 @@ import os
 import sys
 import time
 from copy import deepcopy
+from io import StringIO
 
 import pytest
-from six import StringIO
 
 from datadog_checks.base.utils.common import get_docker_hostname
 from datadog_checks.dev import RetryError, docker_run
@@ -92,6 +92,13 @@ def get_conn_failure_config():
     conn_failure_config['expected_mode'] = 'down'
     conn_failure_config['tags'] = ["mytag"]
     return conn_failure_config
+
+
+@pytest.fixture
+def get_multiple_expected_modes_config():
+    config = deepcopy(VALID_CONFIG)
+    config.update({'expected_mode': ['standalone', 'leader']})
+    return config
 
 
 def get_version():

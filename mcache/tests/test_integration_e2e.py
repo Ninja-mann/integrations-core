@@ -3,6 +3,7 @@
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import pytest
 
+from datadog_checks.dev.utils import get_metadata_metrics
 from datadog_checks.mcache import Memcache
 
 from .common import HOST, PORT, SERVICE_CHECK, requires_socket_support, requires_unix_utils
@@ -39,6 +40,7 @@ def test_e2e(client, dd_agent_check, instance):
     aggregator = dd_agent_check(instance, rate=True)
 
     assert_check_coverage(aggregator)
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics())
 
 
 @pytest.mark.integration
@@ -72,6 +74,7 @@ def test_metrics(client, instance, aggregator, dd_run_check):
     dd_run_check(check)
 
     assert_check_coverage(aggregator)
+    aggregator.assert_metrics_using_metadata(get_metadata_metrics(), check_submission_type=True)
 
 
 @pytest.mark.integration
@@ -151,3 +154,18 @@ def test_connections_leaks(check, instance):
     check.check(instance)
     # Verify that the count is still 0
     assert count_connections(PORT) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures('dd_environment_ipv6')
+def test_service_ok_ipv6(instance_ipv6, aggregator, dd_run_check):
+    """
+    Service is up
+    """
+    tags = ["host:[2001:db8::2]", "port:{}".format(PORT), "foo:bar"]
+    check = Memcache('mcache', {}, [instance_ipv6])
+    dd_run_check(check)
+    assert len(aggregator.service_checks(SERVICE_CHECK)) == 1
+    sc = aggregator.service_checks(SERVICE_CHECK)[0]
+    assert sc.status == check.OK
+    assert sc.tags == tags

@@ -24,9 +24,9 @@ Then, edit the `vsphere.d/conf.yaml` file in the `conf.d/` folder at the root of
 
 ### Compatibility
 
-Starting with v5.0.0 of the check, shipped in Agent v6.18.0/7.18.0, a new implementation was introduced which required changes to the configuration file. To preserve backwards compatibility, a configuration parameter called `use_legacy_implementation` was temporarily introduced.
+Starting with v5.0.0 of the check, shipped in Agent v6.18.0/7.18.0, a new implementation was introduced which required changes to the configuration file. To preserve backwards compatibility, a configuration parameter called `use_legacy_check_version` was temporarily introduced.
 If you are upgrading from an older version of the integration, this parameter is unset in the config and forces the Agent to use the older implementation.
-If you are configuring the integration for the first time or if you want to benefit from the new features (like tag collection and advanced filtering options), see the [sample vsphere.d/conf.yaml][4] configuration file. In particular, make sure to set `use_legacy_implementation: false`.
+If you are configuring the integration for the first time or if you want to benefit from the new features (like tag collection and advanced filtering options), see the [sample vsphere.d/conf.yaml][4] configuration file. In particular, make sure to set `use_legacy_check_version: false`.
 
 ### Validation
 
@@ -57,25 +57,33 @@ collect_per_instance_filters:
 
 `disk` metrics are specific for each disk on the host, therefore these metrics need to be enabled using `collect_per_instance_filters` to be collected.
 
+#### Collecting property metrics
+
+The vSphere integration can also collect property-based metrics. These are configuration properties, such as if a host is in maintenance mode or a cluster is configured with DRS.
+
+To enable property metrics, configure the following option:
+```
+collect_property_metrics: true
+```
+
+Property metrics are prefixed by the resource name. For example, host property metrics metrics are prefixed with `vsphere.host.*`, and VM property metrics are prefixed with `vsphere.vm.*`. View all the possible property metrics in the [metadata.csv][10].
+
+
 ### Events
 
-This check watches vCenter's Event Manager for events and emits them to Datadog. It emits the following event types:
+This check watches vCenter's Event Manager for events and emits them to Datadog. The check defaults to emit the following event types:
 
-- AlarmStatusChangedEvent:Gray
+- AlarmStatusChangedEvent
 - VmBeingHotMigratedEvent
 - VmReconfiguredEvent
 - VmPoweredOnEvent
 - VmMigratedEvent
-- TaskEvent:Initialize powering On
-- TaskEvent:Power Off virtual machine
-- TaskEvent:Power On virtual machine
-- TaskEvent:Reconfigure virtual machine
-- TaskEvent:Relocate virtual machine
-- TaskEvent:Suspend virtual machine
-- TaskEvent:Migrate virtual machine
+- TaskEvent
 - VmMessageEvent
 - VmSuspendedEvent
 - VmPoweredOffEvent
+
+Use the `include_events` parameter section in the [sample vsphere.d/conf.yaml][4] to collect additional events from the `vim.event` class .
 
 ### Service Checks
 
@@ -89,13 +97,21 @@ See [service_checks.json][12] for a list of service checks provided by this inte
 
 You can limit the number of VMs pulled in with the VMWare integration using the `vsphere.d/conf.yaml` file. See the `resource_filters` parameter section in the [sample vsphere.d/conf.yaml][4].
 
+## Billing
+
+- [vSphere Integration Billing][17]
+
+## Monitoring vSphere Tanzu Kubernetes Grid (TKG)
+
+The Datadog vSphere integration collects metrics and events from your [TKG][13] VMs and control plane VMs automatically. To collect more granular information about your TKG cluster, including container-, pod-, and node-level metrics, you can install the [Datadog Agent][14] on your cluster. See the [distribution documentation][15] for example configuration files specific to TKG.
+
 ## Further Reading
 
-- [Monitor vSphere with Datadog][13]
+- [Monitor vSphere with Datadog][16]
 
 
 [1]: https://raw.githubusercontent.com/DataDog/integrations-core/master/vsphere/images/vsphere_graph.png
-[2]: https://app.datadoghq.com/account/settings#agent
+[2]: https://app.datadoghq.com/account/settings/agent/latest
 [3]: https://docs.datadoghq.com/agent/guide/agent-configuration-files/#agent-configuration-directory
 [4]: https://github.com/DataDog/integrations-core/blob/master/vsphere/datadog_checks/vsphere/data/conf.yaml.example
 [5]: https://docs.datadoghq.com/agent/guide/agent-commands/#start-stop-and-restart-the-agent
@@ -105,4 +121,8 @@ You can limit the number of VMs pulled in with the VMWare integration using the 
 [10]: https://github.com/DataDog/integrations-core/blob/master/vsphere/metadata.csv
 [11]: https://www.vmware.com/pdf/vi_architecture_wp.pdf
 [12]: https://github.com/DataDog/integrations-core/blob/master/vsphere/assets/service_checks.json
-[13]: https://www.datadoghq.com/blog/unified-vsphere-app-monitoring-datadog/#auto-discovery-across-vm-and-app-layers
+[13]: https://tanzu.vmware.com/kubernetes-grid
+[14]: https://docs.datadoghq.com/containers/kubernetes/installation/?tab=operator
+[15]: https://docs.datadoghq.com/containers/kubernetes/distributions/?tab=operator#TKG
+[16]: https://www.datadoghq.com/blog/unified-vsphere-app-monitoring-datadog/#auto-discovery-across-vm-and-app-layers
+[17]: https://docs.datadoghq.com/account_management/billing/vsphere

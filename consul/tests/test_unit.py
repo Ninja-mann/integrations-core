@@ -188,6 +188,7 @@ def test_service_checks(aggregator):
         "check:server-loadbalancer",
         "consul_service_id:server-loadbalancer",
         "consul_service:server-loadbalancer",
+        "consul_node:node-1",
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.CRITICAL, tags=expected_tags, count=1)
 
@@ -196,6 +197,7 @@ def test_service_checks(aggregator):
         "check:server-api",
         "consul_service_id:server-loadbalancer",
         "consul_service:server-loadbalancer",
+        "consul_node:node-1",
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.OK, tags=expected_tags, count=1)
 
@@ -203,10 +205,16 @@ def test_service_checks(aggregator):
         "consul_datacenter:dc1",
         "check:server-api",
         "consul_service:server-loadbalancer",
+        "consul_node:node-1",
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.OK, tags=expected_tags, count=1)
 
-    expected_tags = ["consul_datacenter:dc1", "check:server-api", "consul_service_id:server-loadbalancer"]
+    expected_tags = [
+        "consul_datacenter:dc1",
+        "check:server-api",
+        "consul_service_id:server-loadbalancer",
+        "consul_node:node-1",
+    ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.OK, tags=expected_tags, count=1)
 
     expected_tags = [
@@ -214,6 +222,7 @@ def test_service_checks(aggregator):
         "check:server-status-empty",
         "consul_service_id:server-empty",
         "consul_service:server-empty",
+        "consul_node:node-1",
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.UNKNOWN, tags=expected_tags, count=1)
 
@@ -232,6 +241,7 @@ def test_service_checks_disable_service_tag(aggregator):
         'check:server-loadbalancer',
         'consul_service_id:server-loadbalancer',
         'consul_service:server-loadbalancer',
+        'consul_node:node-1',
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.CRITICAL, tags=expected_tags, count=1)
 
@@ -240,13 +250,24 @@ def test_service_checks_disable_service_tag(aggregator):
         'check:server-api',
         'consul_service_id:server-loadbalancer',
         'consul_service:server-loadbalancer',
+        'consul_node:node-1',
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.OK, tags=expected_tags, count=1)
 
-    expected_tags = ['consul_datacenter:dc1', 'check:server-api', 'consul_service:server-loadbalancer']
+    expected_tags = [
+        'consul_datacenter:dc1',
+        'check:server-api',
+        'consul_service:server-loadbalancer',
+        'consul_node:node-1',
+    ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.OK, tags=expected_tags, count=1)
 
-    expected_tags = ['consul_datacenter:dc1', 'check:server-api', 'consul_service_id:server-loadbalancer']
+    expected_tags = [
+        'consul_datacenter:dc1',
+        'check:server-api',
+        'consul_service_id:server-loadbalancer',
+        'consul_node:node-1',
+    ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.OK, tags=expected_tags, count=1)
 
     expected_tags = [
@@ -254,6 +275,7 @@ def test_service_checks_disable_service_tag(aggregator):
         'check:server-status-empty',
         'consul_service_id:server-empty',
         'consul_service:server-empty',
+        'consul_node:node-1',
     ]
     aggregator.assert_service_check('consul.check', status=ConsulCheck.UNKNOWN, tags=expected_tags, count=1)
 
@@ -437,6 +459,42 @@ def test_network_latency_checks(aggregator):
 
 
 @pytest.mark.parametrize(
+    'use_node_name_as_hostname, expected_hostname, expected_tags',
+    [
+        ('false', [''], ['host-1', 'host-2']),
+        ('true', ['host-1'], ['host-1']),
+    ],
+)
+def test_network_latency_node_name(aggregator, use_node_name_as_hostname, expected_hostname, expected_tags):
+    consul_mocks.MOCK_CONFIG_NETWORK_LATENCY_CHECKS['use_node_name_as_hostname'] = use_node_name_as_hostname
+    consul_check = ConsulCheck(common.CHECK_NAME, {}, [consul_mocks.MOCK_CONFIG_NETWORK_LATENCY_CHECKS])
+
+    consul_mocks.mock_check(consul_check, consul_mocks._get_consul_mocks())
+
+    # We start out as the leader, and stay that way
+    consul_check._last_known_leader = consul_mocks.mock_get_cluster_leader_A()
+
+    consul_check.check(None)
+
+    metrics = [
+        'consul.net.node.latency.max',
+        'consul.net.node.latency.median',
+        'consul.net.node.latency.min',
+        'consul.net.node.latency.p25',
+        'consul.net.node.latency.p75',
+        'consul.net.node.latency.p90',
+        'consul.net.node.latency.p95',
+        'consul.net.node.latency.p99',
+    ]
+
+    for m in metrics:
+        for host in expected_hostname:
+            for tag in expected_tags:
+                tags = ['consul_datacenter:dc1', 'consul_node_name:{}'.format(tag)]
+                aggregator.assert_metric(m, hostname=host, tags=tags)
+
+
+@pytest.mark.parametrize(
     'test_case, extra_config, expected_http_kwargs',
     [
         (
@@ -496,14 +554,14 @@ def test_config(test_case, extra_config, expected_http_kwargs, mocker):
 
         check.check(None)
 
-        http_wargs = dict(
-            auth=mock.ANY,
-            cert=mock.ANY,
-            headers=mock.ANY,
-            proxies=mock.ANY,
-            timeout=mock.ANY,
-            verify=mock.ANY,
-            allow_redirects=mock.ANY,
-        )
+        http_wargs = {
+            'auth': mock.ANY,
+            'cert': mock.ANY,
+            'headers': mock.ANY,
+            'proxies': mock.ANY,
+            'timeout': mock.ANY,
+            'verify': mock.ANY,
+            'allow_redirects': mock.ANY,
+        }
         http_wargs.update(expected_http_kwargs)
         r.get.assert_called_with('/v1/status/leader', **http_wargs)

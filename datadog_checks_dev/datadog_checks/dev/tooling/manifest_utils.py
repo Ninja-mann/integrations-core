@@ -15,7 +15,17 @@ NON_INTEGRATION_PATHS = [
     "datadog_checks_dependency_provider",
     "datadog_checks_dev",
     "datadog_checks_downloader",
+    "ddev",
 ]
+
+# The manifest.json file can contain the source_type_name field that the validation uses to validate different parts
+# of the integration. For example Zabbix was renamed to Zabbix (Community Version) in the manifest.json file, so we
+# need to map it back to Zabbix for validations to pass.
+EXCEPTION_MAPPER = {
+    'Zabbix (Community Version)': 'Zabbix',
+    'Scalr (Community Version)': 'Scalr',
+    'Zscaler (Community Version)': 'Zscaler',
+}
 
 
 class Manifest:
@@ -75,7 +85,7 @@ class ManifestV1:
     def add_dashboard(self, title, file_name):
         # Default manifest dashboards to an empty dictionary in the event the key isn't already in the manifest
         if not self._manifest_json['assets'].get('dashboards'):
-            self._manifest_json['assets']['dashboards'] = dict()
+            self._manifest_json['assets']['dashboards'] = {}
         self._manifest_json['assets']['dashboards'][title] = f'assets/dashboards/{file_name}'
 
     def get_path(self, path):
@@ -130,14 +140,16 @@ class ManifestV2:
     def add_dashboard(self, title, file_name):
         # Default manifest dashboards to an empty dictionary in the event the key isn't already in the manifest
         if not self._manifest_json['assets'].get('dashboards'):
-            self._manifest_json['assets']['dashboards'] = dict()
+            self._manifest_json['assets']['dashboards'] = {}
         self._manifest_json['assets']['dashboards'][title] = f'assets/dashboards/{file_name}'
 
     def get_path(self, path):
         return self._manifest_json.get(path)
 
     def get_display_name(self):
-        return self._manifest_json.get_path("/assets/integration/source_type_name")
+        display_name = self._manifest_json.get_path("/assets/integration/source_type_name")
+        display_name = EXCEPTION_MAPPER.get(display_name, display_name)
+        return display_name
 
     def get_app_id(self):
         return self._manifest_json['app_id']
@@ -152,7 +164,10 @@ class ManifestV2:
         return path_join(get_root(), self._check_name, 'assets', 'dashboards')
 
     def get_eula_from_manifest(self):
-        path = self._manifest_json['legal_terms']['eula']
+        path = self._manifest_json.get('legal_terms', {}).get('eula')
+        if path is None:
+            return None, False
+
         path = os.path.join(get_root(), self._check_name, *path.split('/'))
         return path, file_exists(path)
 
@@ -168,3 +183,6 @@ class ManifestV2:
 
     def has_integration(self):
         return self._manifest_json.get_path("/assets/integration") is not None
+
+    def has_metrics_integration(self):
+        return self._manifest_json.get_path("/assets/integration/metrics") is not None

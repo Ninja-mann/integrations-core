@@ -11,9 +11,9 @@ import mock
 import pytest
 import requests
 import requests_mock
-from six import iteritems
 
 from datadog_checks.base.checks.kubelet_base.base import KubeletCredentials
+from datadog_checks.base.errors import SkipInstanceError
 from datadog_checks.base.utils.date import parse_rfc3339
 from datadog_checks.dev.http import MockResponse
 from datadog_checks.kubelet import KubeletCheck, PodListUtils
@@ -23,7 +23,16 @@ pytestmark = pytest.mark.skipif(sys.platform == 'win32', reason='tests for linux
 
 # Constants
 HERE = os.path.abspath(os.path.dirname(__file__))
-QUANTITIES = {'12k': 12 * 1000, '12M': 12 * (1000 * 1000), '12Ki': 12.0 * 1024, '12K': 12.0, '12test': 12.0}
+QUANTITIES = {
+    '12k': 12 * 1000,
+    '12M': 12 * (1000 * 1000),
+    '12Ki': 12.0 * 1024,
+    '12K': 12.0,
+    '12test': 12.0,
+    '1.181116006E9': 1.181116006 * (10**9),
+    '129e6': 129 * (10**6),
+    '12E': 12 * (1000 * 1000 * 1000 * 1000 * 1000 * 1000),
+}
 
 # Kubernetes versions, used to differentiate cadvisor payloads after the label change
 KUBE_POST_1_16 = '1.16'
@@ -67,9 +76,15 @@ EXPECTED_METRICS_COMMON = [
     'kubernetes.network.tx_bytes',
     'kubernetes.ephemeral_storage.usage',
     'kubernetes.runtime.cpu.usage',
+    'kubernetes.runtime.memory.usage',
     'kubernetes.runtime.memory.rss',
     'kubernetes.kubelet.cpu.usage',
+    'kubernetes.kubelet.memory.usage',
     'kubernetes.kubelet.memory.rss',
+    'kubernetes.node.filesystem.usage',
+    'kubernetes.node.filesystem.usage_pct',
+    'kubernetes.node.image.filesystem.usage',
+    'kubernetes.node.image.filesystem.usage_pct',
 ]
 
 EXPECTED_METRICS_PROMETHEUS = [
@@ -148,6 +163,7 @@ EXPECTED_METRICS_PROMETHEUS_1_21 = [
     'kubernetes.go_threads',
     'kubernetes.kubelet.container.log_filesystem.used_bytes',
     'kubernetes.kubelet.cpu.usage',
+    'kubernetes.kubelet.memory.usage',
     'kubernetes.kubelet.memory.rss',
     'kubernetes.kubelet.network_plugin.latency.count',
     'kubernetes.kubelet.network_plugin.latency.sum',
@@ -173,7 +189,12 @@ EXPECTED_METRICS_PROMETHEUS_1_21 = [
     'kubernetes.rest.client.latency.sum',
     'kubernetes.rest.client.requests',
     'kubernetes.runtime.cpu.usage',
+    'kubernetes.runtime.memory.usage',
     'kubernetes.runtime.memory.rss',
+    'kubernetes.node.filesystem.usage',
+    'kubernetes.node.filesystem.usage_pct',
+    'kubernetes.node.image.filesystem.usage',
+    'kubernetes.node.image.filesystem.usage_pct',
 ]
 
 COMMON_TAGS = {
@@ -183,6 +204,11 @@ COMMON_TAGS = {
     'container_id://5741ed2471c0e458b6b95db40ba05d1a5ee168256638a0264f08703e48d76561': [
         'kube_container_name:fluentd-gcp',
         'kube_deployment:fluentd-gcp-v2.0.10',
+    ],
+    'container_id://1d1f139dc1c9d49010512744df34740abcfaadf9930d3afd85afbf5fccfadbd6': [
+        'kube_container_name:init',
+        'kube_deployment:fluentd-gcp-v2.0.10',
+        'kube_namespace:default',
     ],
     "container_id://580cb469826a10317fd63cc780441920f49913ae63918d4c7b19a72347645b05": [
         'kube_container_name:prometheus-to-sd-exporter',
@@ -210,6 +236,10 @@ COMMON_TAGS = {
     "container_id://a335589109ce5506aa69ba7481fc3e6c943abd23c5277016c92dac15d0f40479": [
         'kube_container_name:datadog-agent'
     ],
+    'container_id://80bd9ebe296615341c68d571e843d800fb4a75bef696d858065572ab4e49920c': [
+        'kube_container_name:running-init',
+        'kube_namespace:default',
+    ],
     "container_id://326b384481ca95204018e3e837c61e522b64a3b86c3804142a22b2d1db9dbd7b": [
         'kube_container_name:datadog-agent'
     ],
@@ -230,6 +260,15 @@ COMMON_TAGS = {
         'persistentvolumeclaim:www-web-2',
         'persistentvolumeclaim:www2-web-3',
         'pod_phase:running',
+    ],
+    'kubernetes_pod_uid://d2dfd16e-e829-4f66-91d5-f9233ca7332b': [
+        'pod_name:sidecar-second',
+        'kube_namespace:default',
+    ],
+    'container_id://80bd9ebe296615341c68d571e843d800fb4a75bef696d858065572ab4e49920b': [
+        'kube_container_name:sidecar',
+        'pod_name:sidecar-second',
+        'kube_namespace:default',
     ],
 }
 
@@ -426,7 +465,7 @@ def test_bad_config():
 
 
 def test_parse_quantity():
-    for raw, res in iteritems(QUANTITIES):
+    for raw, res in QUANTITIES.items():
         assert KubeletCheck.parse_quantity(raw) == res
 
 
@@ -691,6 +730,7 @@ def test_report_pods_running(monkeypatch, tagger):
         mock.call('kubernetes.pods.running', 1, ["pod_name:fluentd-gcp-v2.0.10-9q9t4"]),
         mock.call('kubernetes.pods.running', 1, ["pod_name:fluentd-gcp-v2.0.10-p13r3"]),
         mock.call('kubernetes.pods.running', 1, ['pod_name:demo-app-success-c485bc67b-klj45']),
+        mock.call('kubernetes.pods.running', 1, ['kube_namespace:default', 'pod_name:sidecar-second']),
         mock.call(
             'kubernetes.containers.running',
             2,
@@ -702,12 +742,27 @@ def test_report_pods_running(monkeypatch, tagger):
             ["kube_container_name:prometheus-to-sd-exporter", "kube_deployment:fluentd-gcp-v2.0.10"],
         ),
         mock.call('kubernetes.containers.running', 1, ['pod_name:demo-app-success-c485bc67b-klj45']),
+        mock.call(
+            'kubernetes.containers.running',
+            1,
+            ['kube_container_name:running-init', 'kube_namespace:default'],
+        ),
+        mock.call(
+            'kubernetes.containers.running',
+            1,
+            ['kube_container_name:sidecar', 'kube_namespace:default', 'pod_name:sidecar-second'],
+        ),
     ]
     check.gauge.assert_has_calls(calls, any_order=True)
     # Make sure non running container/pods are not sent
     bad_calls = [
         mock.call('kubernetes.pods.running', 1, ['pod_name:dd-agent-q6hpw']),
         mock.call('kubernetes.containers.running', 1, ['pod_name:dd-agent-q6hpw']),
+        mock.call(
+            'kubernetes.containers.running',
+            1,
+            ["kube_container_name:init", "kube_deployment:fluentd-gcp-v2.0.10"],
+        ),
     ]
     for c in bad_calls:
         assert c not in check.gauge.mock_calls
@@ -771,9 +826,27 @@ def test_report_container_spec_metrics(monkeypatch, tagger):
         mock.call('kubernetes.cpu.limits', 0.25, ['kube_container_name:datadog-agent'] + instance_tags),
         mock.call('kubernetes.memory.limits', 536870912.0, ['kube_container_name:datadog-agent'] + instance_tags),
         mock.call('kubernetes.cpu.requests', 0.1, ["pod_name:demo-app-success-c485bc67b-klj45"] + instance_tags),
+        # init container
+        mock.call(
+            'kubernetes.cpu.requests',
+            0.05,
+            ['kube_container_name:running-init', 'kube_namespace:default'] + instance_tags,
+        ),
+        mock.call(
+            'kubernetes.memory.requests',
+            104857600.0,
+            ['kube_container_name:running-init', 'kube_namespace:default'] + instance_tags,
+        ),
+        mock.call(
+            'kubernetes.memory.limits',
+            157286400.0,
+            ['kube_container_name:running-init', 'kube_namespace:default'] + instance_tags,
+        ),
     ]
-    if any(map(lambda e: 'pod_name:pi-kff76' in e, [x[0][2] for x in check.gauge.call_args_list])):
+    if any(('pod_name:pi-kff76' in e for e in [x[0][2] for x in check.gauge.call_args_list])):
         raise AssertionError("kubernetes.cpu.requests was submitted for a non-running pod")
+    if any(('kube_container_name:init' in e for e in [x[0][2] for x in check.gauge.call_args_list])):
+        raise AssertionError("kubernetes.cpu.requests was submitted for a terminated init container")
     check.gauge.assert_has_calls(calls, any_order=True)
 
 
@@ -823,15 +896,22 @@ def test_report_container_state_metrics(monkeypatch, tagger):
         ),
         mock.call('kubernetes.containers.restarts', 0, ['kube_container_name:datadog-agent'] + instance_tags),
         mock.call('kubernetes.containers.restarts', 0, ['kube_container_name:datadog-agent'] + instance_tags),
+        # init container
+        mock.call(
+            'kubernetes.containers.restarts',
+            0,
+            ['kube_container_name:init', 'kube_deployment:fluentd-gcp-v2.0.10', 'kube_namespace:default']
+            + instance_tags,
+        ),
     ]
     check.gauge.assert_has_calls(calls, any_order=True)
 
     container_state_gauges = [
         x[0][2] for x in check.gauge.call_args_list if x[0][0].startswith('kubernetes.containers.state')
     ]
-    if any(map(lambda e: 'reason:TransientReason' in e, container_state_gauges)):
+    if any(('reason:TransientReason' in e for e in container_state_gauges)):
         raise AssertionError('kubernetes.containers.state.* was submitted with a transient reason')
-    if any(map(lambda e: not any(x for x in e if x.startswith('reason:')), container_state_gauges)):
+    if any((not any(x for x in e if x.startswith('reason:')) for e in container_state_gauges)):
         raise AssertionError('kubernetes.containers.state.* was submitted without a reason')
 
 
@@ -847,9 +927,52 @@ def test_no_tags_no_metrics(monkeypatch, aggregator, tagger):
     aggregator.assert_metric('kubernetes.memory.capacity')
     aggregator.assert_metric('kubernetes.cpu.capacity')
     aggregator.assert_metric('kubernetes.runtime.cpu.usage')
+    aggregator.assert_metric('kubernetes.runtime.memory.usage')
     aggregator.assert_metric('kubernetes.runtime.memory.rss')
     aggregator.assert_metric('kubernetes.kubelet.cpu.usage')
+    aggregator.assert_metric('kubernetes.kubelet.memory.usage')
     aggregator.assert_metric('kubernetes.kubelet.memory.rss')
+    aggregator.assert_metric('kubernetes.apiserver.certificate.expiration.count')
+    aggregator.assert_metric('kubernetes.apiserver.certificate.expiration.sum')
+    aggregator.assert_metric('kubernetes.go_goroutines')
+    aggregator.assert_metric('kubernetes.go_threads')
+    aggregator.assert_metric('kubernetes.kubelet.container.log_filesystem.used_bytes')
+    aggregator.assert_metric('kubernetes.kubelet.docker.errors')
+    aggregator.assert_metric('kubernetes.kubelet.docker.operations')
+    aggregator.assert_metric('kubernetes.kubelet.docker.operations.duration.count')
+    aggregator.assert_metric('kubernetes.kubelet.docker.operations.duration.quantile')
+    aggregator.assert_metric('kubernetes.kubelet.docker.operations.duration.sum')
+    aggregator.assert_metric('kubernetes.kubelet.evictions')
+    aggregator.assert_metric('kubernetes.kubelet.network_plugin.latency.count')
+    aggregator.assert_metric('kubernetes.kubelet.network_plugin.latency.sum')
+    aggregator.assert_metric('kubernetes.kubelet.pleg.relist_duration.count')
+    aggregator.assert_metric('kubernetes.kubelet.pleg.relist_duration.sum')
+    aggregator.assert_metric('kubernetes.kubelet.pleg.relist_interval.count')
+    aggregator.assert_metric('kubernetes.kubelet.pleg.relist_interval.sum')
+    aggregator.assert_metric('kubernetes.kubelet.pod.start.duration.count')
+    aggregator.assert_metric('kubernetes.kubelet.pod.start.duration.sum')
+    aggregator.assert_metric('kubernetes.kubelet.pod.worker.duration.count')
+    aggregator.assert_metric('kubernetes.kubelet.pod.worker.duration.sum')
+    aggregator.assert_metric('kubernetes.kubelet.pod.worker.start.duration.count')
+    aggregator.assert_metric('kubernetes.kubelet.pod.worker.start.duration.sum')
+    aggregator.assert_metric('kubernetes.kubelet.runtime.errors')
+    aggregator.assert_metric('kubernetes.kubelet.runtime.operations')
+    aggregator.assert_metric('kubernetes.kubelet.runtime.operations.duration.count')
+    aggregator.assert_metric('kubernetes.kubelet.runtime.operations.duration.quantile')
+    aggregator.assert_metric('kubernetes.kubelet.runtime.operations.duration.sum')
+    aggregator.assert_metric('kubernetes.kubelet.volume.stats.available_bytes')
+    aggregator.assert_metric('kubernetes.kubelet.volume.stats.capacity_bytes')
+    aggregator.assert_metric('kubernetes.kubelet.volume.stats.inodes')
+    aggregator.assert_metric('kubernetes.kubelet.volume.stats.inodes_free')
+    aggregator.assert_metric('kubernetes.kubelet.volume.stats.inodes_used')
+    aggregator.assert_metric('kubernetes.kubelet.volume.stats.used_bytes')
+    aggregator.assert_metric('kubernetes.rest.client.latency.count')
+    aggregator.assert_metric('kubernetes.rest.client.latency.sum')
+    aggregator.assert_metric('kubernetes.rest.client.requests')
+    aggregator.assert_metric('kubernetes.node.filesystem.usage')
+    aggregator.assert_metric('kubernetes.node.filesystem.usage_pct')
+    aggregator.assert_metric('kubernetes.node.image.filesystem.usage')
+    aggregator.assert_metric('kubernetes.node.image.filesystem.usage_pct')
     aggregator.assert_all_metrics_covered()
 
 
@@ -1063,6 +1186,12 @@ def test_process_stats_summary_not_source_linux(monkeypatch, aggregator, tagger)
     aggregator.assert_metric('kubernetes.kubelet.cpu.usage', 36755862.0, ['instance:tag'])
     aggregator.assert_metric('kubernetes.runtime.memory.rss', 101273600.0, ['instance:tag'])
     aggregator.assert_metric('kubernetes.kubelet.memory.rss', 88477696.0, ['instance:tag'])
+    # pending pod
+    aggregator.assert_metric(
+        'kubernetes.ephemeral_storage.usage',
+        32768.0,
+        ['instance:tag', 'pod_name:sidecar-second', 'kube_namespace:default'],
+    )
 
 
 def test_process_stats_summary_as_source(monkeypatch, aggregator, tagger):
@@ -1183,6 +1312,7 @@ def test_process_stats_summary_as_source_filtering_by_namespace(monkeypatch):
     monkeypatch.setattr(check, 'rate', mock.Mock())
     pod_list_utils = PodListUtils(json.loads(mock_from_file('pods_windows.json')))
     stats = json.loads(mock_from_file('stats_summary_windows.json'))
+    del stats['node']
 
     # Namespace is excluded, so it shouldn't report any metrics
     monkeypatch.setattr(pod_list_utils, 'is_namespace_excluded', mock.Mock(return_value=True))
@@ -1222,6 +1352,12 @@ def test_create_pod_tags_by_pvc(monkeypatch, tagger):
     pod_tags_by_pvc = check._create_pod_tags_by_pvc(pod_list)
 
     expected_result = {
+        'default/web-2-ephemeralvolume': {
+            'kube_namespace:default',
+            'kube_service:nginx',
+            'kube_stateful_set:web',
+            'namespace:default',
+        },
         'default/www-web-2': {
             'kube_namespace:default',
             'kube_service:nginx',
@@ -1394,6 +1530,18 @@ def test_probe_metrics(monkeypatch, aggregator, tagger):
         ['kube_container_name:dnsmasq', 'kube_namespace:kube-system', 'pod_name:kube-dns-c598bd956-wgf4n'],
     )
 
+    aggregator.assert_metric(
+        'kubernetes.startup_probe.success.total',
+        70,
+        ['kube_container_name:kubedns', 'kube_namespace:kube-system', 'pod_name:kube-dns-c598bd956-wgf4n'],
+    )
+
+    aggregator.assert_metric(
+        'kubernetes.startup_probe.failure.total',
+        70,
+        ['kube_container_name:kubedns', 'kube_namespace:kube-system', 'pod_name:kube-dns-c598bd956-wgf4n'],
+    )
+
 
 @pytest.fixture()
 def mock_request():
@@ -1403,8 +1551,11 @@ def mock_request():
 
 def test_detect_probes(monkeypatch, mock_request):
     mock_request.head('http://kubelet:10250/metrics/probes', status_code=200)
-    check = mock_kubelet_check(monkeypatch, [{}])
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    instance = {'prometheus_url': 'http://kubelet:10250', 'namespace': 'kubernetes'}
+    check = mock_kubelet_check(monkeypatch, [instance])
+    scraper_config = check.get_scraper_config(instance)
+    http_handler = check.get_http_handler(scraper_config)
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is True
     assert check._probes_available is True
     assert mock_request.call_count == 1
@@ -1412,12 +1563,15 @@ def test_detect_probes(monkeypatch, mock_request):
 
 def test_detect_probes_cached(monkeypatch, mock_request):
     mock_request.head('http://kubelet:10250/metrics/probes', status_code=200)
-    check = mock_kubelet_check(monkeypatch, [{}])
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    instance = {'prometheus_url': 'http://kubelet:10250', 'namespace': 'kubernetes'}
+    check = mock_kubelet_check(monkeypatch, [instance])
+    scraper_config = check.get_scraper_config(instance)
+    http_handler = check.get_http_handler(scraper_config)
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is True
     assert check._probes_available is True
     assert mock_request.call_count == 1
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is True
     assert check._probes_available is True
     assert mock_request.call_count == 1
@@ -1425,8 +1579,11 @@ def test_detect_probes_cached(monkeypatch, mock_request):
 
 def test_detect_probes_404(monkeypatch, mock_request):
     mock_request.head('http://kubelet:10250/metrics/probes', status_code=404)
-    check = mock_kubelet_check(monkeypatch, [{}])
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    instance = {'prometheus_url': 'http://kubelet:10250', 'namespace': 'kubernetes'}
+    check = mock_kubelet_check(monkeypatch, [instance])
+    scraper_config = check.get_scraper_config(instance)
+    http_handler = check.get_http_handler(scraper_config)
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is False
     assert check._probes_available is False
     assert mock_request.call_count == 1
@@ -1434,12 +1591,15 @@ def test_detect_probes_404(monkeypatch, mock_request):
 
 def test_detect_probes_404_cached(monkeypatch, mock_request):
     mock_request.head('http://kubelet:10250/metrics/probes', status_code=404)
-    check = mock_kubelet_check(monkeypatch, [{}])
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    instance = {'prometheus_url': 'http://kubelet:10250', 'namespace': 'kubernetes'}
+    check = mock_kubelet_check(monkeypatch, [instance])
+    scraper_config = check.get_scraper_config(instance)
+    http_handler = check.get_http_handler(scraper_config)
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is False
     assert check._probes_available is False
     assert mock_request.call_count == 1
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is False
     assert check._probes_available is False
     assert mock_request.call_count == 1
@@ -1447,8 +1607,11 @@ def test_detect_probes_404_cached(monkeypatch, mock_request):
 
 def test_detect_probes_req_exception(monkeypatch, mock_request):
     mock_request.head('http://kubelet:10250/metrics/probes', exc=requests.exceptions.ConnectTimeout)
-    check = mock_kubelet_check(monkeypatch, [{}])
-    available = check.detect_probes('http://kubelet:10250/metrics/probes')
+    instance = {'prometheus_url': 'http://kubelet:10250', 'namespace': 'kubernetes'}
+    check = mock_kubelet_check(monkeypatch, [instance])
+    scraper_config = check.get_scraper_config(instance)
+    http_handler = check.get_http_handler(scraper_config)
+    available = check.detect_probes(http_handler, 'http://kubelet:10250/metrics/probes')
     assert available is False
     assert check._probes_available is None
     assert mock_request.call_count == 1
@@ -1461,3 +1624,24 @@ def test_sanitize_url_label():
     )
     expected = "/api/v1/namespaces/%7Bnamespace%7D/configmaps"
     assert KubeletCheck._sanitize_url_label(input) == expected
+
+
+def test_kubelet_unavailable_check_can_init(monkeypatch):
+    instance = {
+        'kubelet_metrics_endpoint': 'http://10.8.0.1:10255/metrics',
+        'cadvisor_metrics_endpoint': 'http://10.8.0.1:10255/metrics/cadvisor',
+    }
+    kubelet_conn_info = {}
+    with mock.patch('datadog_checks.kubelet.kubelet.get_connection_info', return_value=kubelet_conn_info):
+        check = mock_kubelet_check(monkeypatch, [instance], kube_version=None)
+        assert check is not None
+
+
+def test_kubelet_does_not_init_if_kubelet_core_config_var_set_to_true(monkeypatch):
+    with mock.patch(
+        'datadog_checks.base.stubs.datadog_agent.get_config',
+        return_value={'true'},
+    ):
+        with pytest.raises(SkipInstanceError):
+            KubeletCheck('kubelet', {}, [{}])
+        return

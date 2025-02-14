@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import pytest
 
+from datadog_checks.base.utils.platform import Platform
 from datadog_checks.network import Network
 
 from . import common
@@ -12,12 +13,17 @@ from . import common
 
 @pytest.fixture(scope='session')
 def dd_environment():
-    yield common.INSTANCE, common.E2E_METADATA
+    if Platform.is_windows():
+        yield common.INSTANCE, {
+            'docker_platform': 'windows',
+        }
+    else:
+        yield common.INSTANCE, common.E2E_METADATA
 
 
 @pytest.fixture
 def check():
-    return Network(common.SERVICE_CHECK_NAME, {}, [deepcopy(common.INSTANCE)])
+    return lambda instance: Network(common.SERVICE_CHECK_NAME, {}, [instance])
 
 
 @pytest.fixture

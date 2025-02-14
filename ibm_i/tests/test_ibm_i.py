@@ -1,12 +1,12 @@
 # (C) Datadog, Inc. 2021-present
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
-from typing import Any, Dict
+from typing import Any, Dict  # noqa: F401
 
 import mock
 
 from datadog_checks.base import AgentCheck
-from datadog_checks.base.stubs.aggregator import AggregatorStub
+from datadog_checks.base.stubs.aggregator import AggregatorStub  # noqa: F401
 from datadog_checks.dev.utils import get_metadata_metrics
 from datadog_checks.ibm_i import IbmICheck
 from datadog_checks.ibm_i.check import SystemInfo
@@ -34,9 +34,9 @@ def test_connection_subprocess(instance):
     check = IbmICheck('ibm_i', {}, [instance])
     check.load_configuration_models()
     with mock.patch('datadog_checks.ibm_i.IbmICheck._create_connection_subprocess') as m:
-        check.connection_subprocess
+        _ = check.connection_subprocess
         check._subprocess = mock.MagicMock()
-        check.connection_subprocess
+        _ = check.connection_subprocess
     m.assert_called_once()
 
 

@@ -268,7 +268,6 @@
               "title_align": "left",
               "type": "event_stream",
               "query": "source:watchdog story_type:nginx_plus",
-              "tags_execution": "and",
               "event_size": "l"
             },
             "layout": {
@@ -993,6 +992,5 @@
   "layout_type": "ordered",
   "is_read_only": true,
   "notify_list": [],
-  "reflow_type": "fixed",
-  "id": "49h-duh-3j9"
+  "reflow_type": "fixed"
 }

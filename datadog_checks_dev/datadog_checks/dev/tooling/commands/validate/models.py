@@ -39,6 +39,11 @@ from ..console import (
 
 LICENSE_HEADER = "(C) Datadog, Inc."
 
+INTEGRATIONS_WITHOUT_MODELS = {
+    'snmp',  # Deprecated
+    'tokumx',  # Python 2 only
+}
+
 
 def standardize_new_lines(lines):
     # If a new line is at the start or end of a line, remove it and add it to the list
@@ -77,21 +82,26 @@ def models(ctx, check, sync, verbose):
     checks, an 'all' or empty `check` value will validate all README files.
     """
     root = get_root()
-    community_check = ctx.obj['repo_choice'] not in ('core', 'internal')
+    is_community_check = ctx.obj['repo_choice'] not in ('core', 'internal')
+    is_core_check = ctx.obj['repo_choice'] == 'core'
 
-    checks = process_checks_option(check, source='valid_checks', extend_changed=True)
+    checks = set(process_checks_option(check, source='valid_checks', extend_changed=True))
+
     echo_info(f"Validating data models for {len(checks)} checks ...")
 
     specs_failed = {}
     files_failed = {}
     num_files = 0
 
-    license_header_lines = get_license_header().splitlines(True) + ['\n']
-    documentation_header_lines = ['\n'] + get_config_models_documentation().splitlines(True) + ['\n']
+    license_header_lines = get_license_header().splitlines(True) + ['\n', '\n']
+    documentation_header_lines = get_config_models_documentation().splitlines(True) + ['\n']
 
     code_formatter = ModelConsumer.create_code_formatter()
 
-    for check in checks:
+    if is_core_check:
+        checks = checks.difference(INTEGRATIONS_WITHOUT_MODELS)
+
+    for check in sorted(checks):
         display_queue = {}
         if check == 'datadog_checks_base':
             spec_path = path_join(root, 'datadog_checks_base', 'tests', 'models', 'data', 'spec.yaml')
@@ -126,8 +136,7 @@ def models(ctx, check, sync, verbose):
         else:
             models_location = get_models_location(check)
 
-            # TODO: Remove when all integrations have models
-            if not sync and not dir_exists(models_location):
+            if not sync and not dir_exists(models_location) and not is_core_check:
                 continue
 
         model_consumer = ModelConsumer(spec.data, code_formatter)
@@ -165,26 +174,28 @@ def models(ctx, check, sync, verbose):
                     # validators.py and deprecations.py are custom files, they should only be rendered the first time
                     continue
 
+            if not is_community_check:
                 expected_model_file_lines.extend(license_header_lines)
-                if model_file not in CUSTOM_FILES:
-                    expected_model_file_lines.extend(documentation_header_lines)
-                expected_model_file_lines.extend(generated_model_file_lines)
-            else:
-                if not community_check:
-                    expected_model_file_lines.extend(license_header_lines)
-                if model_file not in CUSTOM_FILES:
-                    expected_model_file_lines.extend(documentation_header_lines)
 
-                expected_model_file_lines.extend(generated_model_file_lines)
+            if model_file not in CUSTOM_FILES:
+                expected_model_file_lines.extend(documentation_header_lines)
+
+            expected_model_file_lines.extend(generated_model_file_lines)
 
             # If we're re-generating a file, we should ensure we do not change the license date
             # We also want to handle the case where there is no license header
-            if len(current_model_file_lines) > 0 and LICENSE_HEADER in current_model_file_lines[0]:
-                expected_model_file_lines[0] = current_model_file_lines[0]
+            if not is_community_check:
+                if len(current_model_file_lines) > 0 and LICENSE_HEADER in current_model_file_lines[0]:
+                    expected_model_file_lines[0] = current_model_file_lines[0]
 
             if not current_model_file_lines or not content_matches(current_model_file_lines, expected_model_file_lines):
                 if sync:
-                    echo_info(f'Writing data model file to `{model_file_path}`')
+                    check_display_queue.append(
+                        (
+                            echo_info,
+                            f'Writing data model file to `{model_file_path}`',
+                        )
+                    )
                     ensure_parent_dir_exists(model_file_path)
                     write_file_lines(model_file_path, expected_model_file_lines)
                 else:
@@ -208,24 +219,24 @@ def models(ctx, check, sync, verbose):
                 for func, message in queue:
                     func(message, indent=True)
 
-    specs_failed = len(specs_failed)
-    files_failed = len(files_failed)
-    files_passed = num_files - files_failed
+    specs_failed_count = len(specs_failed)
+    files_failed_count = len(files_failed)
+    files_passed_count = num_files - files_failed_count
 
-    if specs_failed or files_failed:
+    if specs_failed_count or files_failed_count:
         click.echo()
 
-    if specs_failed:
+    if specs_failed_count:
         echo_failure(f'Specs with errors: {specs_failed}')
 
-    if files_failed:
-        echo_failure(f'Files with errors: {files_failed}')
+    if files_failed_count:
+        echo_failure(f'Files with errors: {files_failed_count}')
 
-    if files_passed:
-        if specs_failed or files_failed:
-            echo_success(f'Files valid: {files_passed}')
+    if files_passed_count:
+        if specs_failed_count or files_failed_count:
+            echo_success(f'Files valid: {files_passed_count}')
         else:
             echo_success(f'All {num_files} data model files are in sync!')
 
-    if specs_failed or files_failed:
+    if specs_failed_count or files_failed_count:
         abort()

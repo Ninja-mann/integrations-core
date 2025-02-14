@@ -1,0 +1,10 @@
+[env.collectors.datadog-checks]
+
+[[envs.default.matrix]]
+python = ["3.12"]
+version = ["1.7"]
+
+[envs.default.overrides]
+matrix.version.env-vars = [
+  { key = "MESOS_MASTER_VERSION", value = "1.7.1", if = ["1.7"] },
+]

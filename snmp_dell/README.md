@@ -14,6 +14,10 @@ For a complete list of all the metrics collected from Dell devices, see the [Net
 
 To install and configure the SNMP integration, see the [Network Device Monitoring][2] documentation.
 
+## Vendor profiles
+
+Specific supported vendor profiles for this integration can be found on the [network vendors][5] page.
+
 ## Data Collected
 
 ### Metrics
@@ -34,6 +38,12 @@ Additional helpful documentation, links, and articles:
 
 * [Monitor SNMP with Datadog][3]
 
-[1]: https://docs.datadoghq.com/network_performance_monitoring/devices/data
-[2]: https://docs.datadoghq.com/network_performance_monitoring/devices/setup
+## Troubleshooting
+
+Need help? Contact [Datadog support][4].
+
+[1]: https://docs.datadoghq.com/network_monitoring/devices/data
+[2]: https://docs.datadoghq.com/network_monitoring/devices/setup
 [3]: https://www.datadoghq.com/blog/monitor-snmp-with-datadog/
+[4]: https://docs.datadoghq.com/help/
+[5]: https://docs.datadoghq.com/network_monitoring/devices/supported_devices/
